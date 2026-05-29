@@ -63,7 +63,7 @@ Full details, register maps, and the reverse-engineering story are in [`docs/`](
 ## Install
 
 ```bash
-git clone https://github.com/<you>/truenas-rn426-panel.git
+git clone https://github.com/riplatt/truenas-rn426-panel.git
 cd truenas-rn426-panel
 sudo ./install.sh /mnt/<your-pool>/rn426-panel
 ```
