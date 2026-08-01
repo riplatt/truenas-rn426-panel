@@ -5,6 +5,10 @@ should work for other Denverton- or Atom-based ReadyNAS units, but the **GPIO pa
 addresses and possibly the display controller differ per model**. Here's how to
 adapt it.
 
+> Looking to run a different **OS** (plain Debian / OMV) on this *same*
+> hardware instead? That's not porting — see
+> [`debian-omv.md`](debian-omv.md).
+
 ## 1. Confirm the display path
 
 Two things to check on your unit:

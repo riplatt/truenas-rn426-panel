@@ -5,8 +5,10 @@
 # registers the daemon as a POSTINIT init script in the TrueNAS config DB (that
 # persists across reboots and updates).
 #
-# This unit is provided for reference and for plain Debian-based systems. Adjust
-# the path in ExecStart to wherever you placed rn426_panel.py.
+# This unit is reference-only for TrueNAS SCALE users, but is the actual, intended
+# install path for plain Debian / OpenMediaVault systems on the same hardware.
+# See docs/debian-omv.md for full install steps. Adjust the path in ExecStart
+# to wherever you placed rn426_panel.py.
 
 [Unit]
 Description=ReadyNAS RN426 front-panel driver (LCD + buttons)

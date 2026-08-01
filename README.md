@@ -53,11 +53,15 @@ from the stock ReadyNAS firmware and reimplemented from scratch in pure Python
 Full details, register maps, and the reverse-engineering story are in [`docs/`](docs/).
 Chassis fan control is a separate concern (a different chip, the IT8622
 Super-I/O, not the front board) but is covered too — see
-[`docs/fan-control.md`](docs/fan-control.md).
+[`docs/fan-control.md`](docs/fan-control.md). Running this on plain Debian or
+OMV instead of TrueNAS SCALE is covered in
+[`docs/debian-omv.md`](docs/debian-omv.md).
 
 ## Requirements
 
-- A ReadyNAS **RN426 / RN526 / RN626X** running **TrueNAS SCALE**.
+- A ReadyNAS **RN426 / RN526 / RN626X**. (This list assumes **TrueNAS SCALE**;
+  running plain Debian or OMV instead? See
+  [`docs/debian-omv.md`](docs/debian-omv.md).)
 - `python3` + **Pillow** (`python3-pil`) and the **DejaVu** fonts — both ship
   with TrueNAS SCALE.
 - Kernel modules `i2c-dev` and `i2c-i801` (loaded automatically by the installer).
@@ -77,6 +81,10 @@ registers a **POSTINIT** init script in the TrueNAS config DB, and starts the
 service. See the script for the exact, reversible steps.
 
 To remove it: `sudo ./install.sh --uninstall /mnt/<your-pool>/rn426-panel`.
+
+Running plain Debian or OpenMediaVault instead of TrueNAS SCALE? Don't run
+`install.sh` (it requires `midclt` and will refuse to run) — see
+[`docs/debian-omv.md`](docs/debian-omv.md) instead.
 
 ## Usage
 
@@ -116,6 +124,15 @@ Customize the pages by editing the `page_*()` functions and the `PAGES` list in
 - **Temp page shows `Fan ?`** — the `it87` kernel module isn't loaded (it
   doesn't autoprobe). See [`docs/fan-control.md`](docs/fan-control.md) for
   how to load it and make that survive reboots.
+
+## Running on plain Debian / OMV
+
+**Hardware requirement is unchanged** — this is still only for a ReadyNAS
+RN426 / RN526 / RN626X, just running a different **OS** on the same front
+board. Nothing in the driver is TrueNAS-specific (it talks to `/dev/mem`,
+`/dev/port` and `/dev/i2c` directly); the only TrueNAS-specific piece is
+`install.sh`. See [`docs/debian-omv.md`](docs/debian-omv.md) for the install
+steps.
 
 ## Porting to other ReadyNAS models
 
