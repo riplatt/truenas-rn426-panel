@@ -1,5 +1,12 @@
 # LCD protocol (SSD1305, bit-bang SPI via /dev/mem)
 
+> ⚠️ **Before touching RST or EN:** never pulse **RST**, never drive **EN**
+> low. Both are *shared* front-board lines, not LCD-private — lowering
+> either wedges the **MSP430** out of button-reporting mode, and only a full
+> **AC power-cycle** recovers it (a warm reboot is not enough). See
+> [`buttons-protocol.md`](buttons-protocol.md) for the related `reg 0x02`
+> hazard on the same MCU.
+
 The display is a **128×32 SSD1305-class** panel driven by **4-wire SPI**
 (CS, CLK, MOSI/SDIN, D/C) plus **RESET** and a display/backlight **EN** line.
 There is no SPI controller in play — the host **bit-bangs** all six signals on
@@ -65,10 +72,16 @@ DC = 1
 CS = 1
 ```
 
-## Step 4 — reset + init sequence
+## Step 4 — init sequence
 
-Pulse **RESET low ~20 ms**, then high ~20 ms, then send the **33-byte init as
-commands** (D/C = 0):
+> ⚠️ **Do NOT pulse RESET.** RST (pin 31) is a **shared front-board reset**
+> line — it does not just reset the SSD1305, it also resets the **MSP430**
+> into a non-button-reporting mode, recoverable only by a full **AC
+> power-cycle** (a warm reboot is not enough). Hold **RST high, always**. The
+> SSD1305 is already powered by the BIOS before TrueNAS boots, so the command
+> sequence below is sufficient to re-init it on its own — no reset needed.
+
+Hold RESET high, then send the **33-byte init as commands** (D/C = 0):
 
 ```
 ae d5 71 a8 1f d9 22 20 02 a1 c8 da 12 d8 00 81 cf b0 d3 00 21 04 83 22 00 03 10 00 40 a6 a4 db 18
@@ -100,7 +113,13 @@ it to this page layout.
 
 ## Sleep / wake
 
-- **Sleep:** `cmd(0xAE)` (display off) and drive **EN low**. Low power, and with
-  the pixels off there's no image-retention/burn-in.
-- **Wake:** because **EN gates panel power**, a wake does a **full re-init**
-  (reset + init + `0xAF`), not just a display-on.
+> ⚠️ **Never drive EN low.** EN (pin 17) is, like RST, a **shared
+> front-board line** — it does not just gate the LCD, it also resets the
+> **MSP430** out of button-reporting mode, recoverable only by a full **AC
+> power-cycle**. Sleep and wake never touch EN.
+
+- **Sleep:** `cmd(0xAE)` (pixels off) **only**. EN is never driven low. With
+  the pixels off there's no image-retention/burn-in; the backlight/MCU power
+  stays exactly as it was.
+- **Wake:** `cmd(0xAF)` (pixels on) **only**. Because EN was never lowered,
+  no re-init is needed — just the one command.

@@ -27,7 +27,8 @@ from the stock ReadyNAS firmware and reimplemented from scratch in pure Python
 - Shows rotating info **pages** you cycle with the buttons:
   1. Hostname + IP
   2. Pool name, health, capacity
-  3. CPU temperature + chassis fan RPM
+  3. CPU temperature + chassis fan RPM (fan RPM requires the `it87` module —
+     see [`docs/fan-control.md`](docs/fan-control.md))
   4. Uptime + load average
 - **Auto-sleeps** the display after a configurable idle timeout (default 90 s) to
   avoid image retention/burn-in, and wakes on any button press.
@@ -50,6 +51,9 @@ from the stock ReadyNAS firmware and reimplemented from scratch in pure Python
   module. See [`docs/buttons-protocol.md`](docs/buttons-protocol.md).
 
 Full details, register maps, and the reverse-engineering story are in [`docs/`](docs/).
+Chassis fan control is a separate concern (a different chip, the IT8622
+Super-I/O, not the front board) but is covered too — see
+[`docs/fan-control.md`](docs/fan-control.md).
 
 ## Requirements
 
@@ -89,19 +93,29 @@ RN_SLEEP=120 ...               # env var: idle seconds before sleep (0 = never)
 Customize the pages by editing the `page_*()` functions and the `PAGES` list in
 `rn426_panel.py`.
 
-## Important gotchas
+## Important gotchas / hardware warnings
 
 - **i2c bus numbers are not stable across reboots** — the i801 and iSMT SMBus
   adapters can swap between `i2c-0` and `i2c-1`. The driver finds the i801 bus by
   name, so don't hard-code it.
-- **Never write the MSP430's `reg 0x02`** (its LED/control register). On this
-  firmware that register *also* gates button scanning; once you disable it, the
-  buttons stop reporting and **only a full power-cycle recovers them — a warm
-  reboot is not enough** (the front board is on standby power). This driver is
-  strictly read-only toward the MCU. If your buttons are dead, do a cold
-  power-off/on once.
-- The LCD's `EN` line gates panel power, so waking from sleep does a full
-  re-init rather than just sending display-on.
+- **Never write the MSP430's `reg 0x02`** (its LED/control register) and
+  **never drive the LCD's `EN` or `RST` low.** All three are the same failure
+  mode: `reg 0x02` also gates button scanning, and `EN`/`RST` are *shared*
+  front-board lines, not LCD-private — lowering either one resets the MSP430
+  the same way writing `reg 0x02` does. Any of the three wedges the MCU out
+  of button-reporting mode. This driver is strictly read-only toward the MCU
+  and never lowers `EN`/`RST` (sleep is pixels-off only via `0xAE`, wake is
+  plain display-on via `0xAF`).
+- **Recovery is the same for all three, and a warm reboot will not do it:**
+  the front board runs on standby power, so only a **full AC power-off/on**
+  (unplug, wait, plug back in) clears a wedged MCU. If your buttons are dead
+  or the display won't come back, pull the power cord.
+
+## Troubleshooting
+
+- **Temp page shows `Fan ?`** — the `it87` kernel module isn't loaded (it
+  doesn't autoprobe). See [`docs/fan-control.md`](docs/fan-control.md) for
+  how to load it and make that survive reboots.
 
 ## Porting to other ReadyNAS models
 

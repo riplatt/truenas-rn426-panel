@@ -1,0 +1,5 @@
+# Authored on Windows, run on Linux. Never let CRLF sneak into a shebang
+# line or break bash/python parsing.
+* text=auto eol=lf
+*.sh text eol=lf
+*.py text eol=lf

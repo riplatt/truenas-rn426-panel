@@ -34,7 +34,7 @@ types; the RN426 uses the **SSD130x "oled" (SPI)** path, not the HD44780 one:
 |--------|--------------|
 | `oled_probe` | reads the per-model config (gpiochip label + 6 pin numbers), claims the gpiod lines |
 | `spi_send` | bit-bangs one SPI byte over 4 gpiod descriptors (CS/CLK/MOSI/DC) |
-| `init_oled` | pulses RESET, sends a 33-byte init table, sets EN, backlight on |
+| `init_oled` | pulses RESET, sends a 33-byte init table, sets EN, backlight on (safe only in NETGEAR's own cold-boot sequence, where the MSP430 is coming up anyway — not safe to replicate once the system is running, see [`lcd-protocol.md`](lcd-protocol.md)) |
 | `oled_data_write` | writes a character (font-rendered) |
 | `readynas_lcd_init` | registers the driver and writes `"Booting.."` |
 

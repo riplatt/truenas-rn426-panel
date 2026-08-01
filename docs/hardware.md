@@ -38,9 +38,10 @@ There is also a small **RTC** on the same SMBus at **`0x44`** (DS1307-class).
 > `i2c-0` and `i2c-1`. Always locate the i801 by name
 > (`/sys/class/i2c-dev/i2c-*/name` contains `SMBus I801 adapter`).
 
-## Not part of this project
+## Related but separate: chassis fan control
 
-- **Chassis fan** control is via the **IT8613/IT8622** Super-I/O (hwmon/LPC),
-  completely separate from the front board. If your fans run flat-out under
-  TrueNAS, that's a different fix (a `pwm` fan-curve daemon reading
-  `/sys/class/hwmon`).
+**Chassis fan** control is via the **IT8613/IT8622** Super-I/O over **LPC**
+(hwmon), a completely different chip and bus from the front board covered by
+this doc — confirmed on this unit as an **IT8622**. If your fans run
+flat-out under TrueNAS, see [`fan-control.md`](fan-control.md) and
+[`../tools/it87-fancontrol.sh`](../tools/it87-fancontrol.sh).

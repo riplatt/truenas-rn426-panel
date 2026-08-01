@@ -42,6 +42,7 @@ cat > "$DEST/start.sh" <<SH
 #!/bin/bash
 modprobe i2c-dev 2>/dev/null
 modprobe i2c-i801 2>/dev/null
+export RN_SLEEP=90   # idle seconds before display sleep; 0 = never
 exec /usr/bin/python3 $DEST/rn426_panel.py run
 SH
 chmod +x "$DEST/start.sh"

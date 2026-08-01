@@ -230,7 +230,7 @@ PAGES = [page_host, page_pool, page_temp, page_uptime]
 
 # --------------------------------------------------------------------------
 def run():
-    sleep_after = int(os.environ.get("RN_SLEEP", "30"))
+    sleep_after = int(os.environ.get("RN_SLEEP", "90"))
     p2sb_unhide()
     lcd = LCD(); lcd.init()
     btn = Buttons()
