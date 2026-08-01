@@ -1,13 +1,13 @@
 # Button protocol (MSP430 over the i801 SMBus)
 
-The 5-way navigation pad is **not** wired to the host directly. The front-board
-**TI MSP430G2518** scans the buttons and exposes their state over the **Intel
-i801 SMBus** at address **`0x1C`**.
+The 5-way navigation pad is not wired to the host directly. The front-board
+TI MSP430G2518 scans the buttons and exposes their state over the Intel
+i801 SMBus at address **`0x1C`**.
 
 ## Reading buttons
 
 Read **register `0x04`** with an SMBus *read-byte-data* transaction. The result
-is an **active-high bitmap** (bit set = button currently pressed):
+is an active-high bitmap (bit set = button currently pressed):
 
 | Bit | Mask | Button |
 |-----|------|--------|
@@ -17,7 +17,7 @@ is an **active-high bitmap** (bit set = button currently pressed):
 | 3 | `0x08` | DOWN / BOTTOM |
 | 4 | `0x10` | CENTER |
 
-The i801 is **SMBus-only** — it does **not** support raw i2c transfers
+The i801 is SMBus-only. It does not support raw i2c transfers
 (`i2ctransfer` fails with *"Adapter does not have I2C transfers capability"*), so
 you must use SMBus byte/word ops. From Python without `smbus2`:
 
@@ -37,29 +37,29 @@ def read_byte_data(reg):
 
 For edge detection (act once per press): `newly_pressed = current & ~previous`.
 
-## Read on interrupt — do NOT poll `reg 0x04` on a timer
+## Read on interrupt: do NOT poll `reg 0x04` on a timer
 
 ⚠️ **Polling `reg 0x04` on a timer eventually breaks the buttons.** It appears to
 work at first, but the MSP430 puts *itself* into a low-power sleep when idle, and
 repeatedly reading it over i2c while it is asleep **corrupts its button scanning**
-over time (we saw it die after a few hours of a gentle ~1 Hz poll). Once corrupted,
+over time (mine died after a few hours of a gentle ~1 Hz poll). Once corrupted,
 `reg 0x04` reads `0x00` no matter what you press, and **only a cold power-cycle
-recovers it** — the same failure mode as writing `reg 0x02` (below). Polling faster
+recovers it**, the same failure mode as writing `reg 0x02` (below). Polling faster
 makes it worse, not better.
 
-The stock firmware never polled: it was **interrupt-driven** (`button_irq_init` +
+The stock firmware never polled: it was interrupt-driven (`button_irq_init` +
 `i2cfb_reporter`), reading `reg 0x04` only the instant the MCU asserted its IRQ.
-You can reproduce that from **userspace, with no kernel module**, because the MCU's
-interrupt line is a **Denverton SoC GPIO pad you can read via `/dev/mem`**:
+You can reproduce that from userspace, with no kernel module, because the MCU's
+interrupt line is a Denverton SoC GPIO pad you can read via `/dev/mem`:
 
 - **INT pad: South GPIO community `0xFDC50000` + offset `0x570`** (pad 46).
-  Read **`RXSTATE` = bit 1** of `PADCFG_DW0`. **Active-low** — idle `1` (high),
+  Read **`RXSTATE` = bit 1** of `PADCFG_DW0`. **Active-low**, idle `1` (high),
   pulled `0` (low) on button activity. (This is the same P2SB/SBREG window the LCD
   driver already uses; see [lcd-protocol.md](lcd-protocol.md). Read it only, never
   drive it.)
 
-The pattern: watch the pad at ~100–200 Hz — a microsecond memory read that **never
-touches the MCU** — and only when it goes low do **one** `read-byte-data` of
+The pattern: watch the pad at ~100–200 Hz, a microsecond memory read that never
+touches the MCU, and only when it goes low do one `read-byte-data` of
 `reg 0x04` to learn which button. This catches every press instantly (including the
 first press after a long idle, the symptom that started this) and never wedges the
 MCU, because i2c is touched only when the MCU is awake and asserting its INT line.
@@ -71,25 +71,25 @@ def int_active():                              # True = button activity (line lo
     return ((struct.unpack_from("<I", mS, 0x570)[0]) >> 1) & 1 == 0
 ```
 
-**Debounce the pulse-train:** the MCU does not hold the line cleanly low — it emits
+**Debounce the pulse-train:** the MCU does not hold the line cleanly low, it emits
 a burst of pulses while a button is active. Treat it as one press, then re-arm only
 after the pad has been continuously **high** for ~50 ms.
 
 ### Finding the INT pad on a different board
 
 If your board isn't an RN426/RN526/RN626X, the INT pad may differ. Use the
-included finder — [`tools/find-int-pad.py`](../tools/find-int-pad.py):
+included finder, [`tools/find-int-pad.py`](../tools/find-int-pad.py):
 
 ```bash
 sudo systemctl stop rn426-panel        # so the LCD doesn't bit-bang pads
 sudo python3 tools/find-int-pad.py     # do nothing, then tap all buttons
 ```
 
-It sweeps **every** North + South `PADCFG_DW0` `RXSTATE` bit in two phases —
-**idle** vs **pressed** — and reports the pad that is *stable while idle* but
+It sweeps every North + South `PADCFG_DW0` `RXSTATE` bit in two phases, idle vs
+pressed, and reports the pad that is *stable while idle* but
 *toggles on presses* (and cross-checks `reg 0x04` to confirm the MCU is reporting).
 **⚠️ Beware decoys:** on the RN426, North `0xFDC20520` is a **free-running** signal
-that toggles even when untouched — it looks like the INT line if you only sample
+that toggles even when untouched. It looks like the INT line if you only sample
 *during* presses, but it is **not** it. That's why the tool always runs an idle
 phase first.
 
@@ -99,7 +99,7 @@ phase first.
 the button backlights). On this firmware it **also gates button scanning**:
 
 - Writing `reg 0x02 = 0x00` turns the backlights off **and disables button
-  reporting** — `reg 0x04` then reads `0x00` no matter what you press.
+  reporting**. `reg 0x04` then reads `0x00` no matter what you press.
 - Writing it back to `0x0F` (or any value) restores the **lights** but **not**
   the scanning.
 - The disabled state **survives a warm reboot** (the front board is on standby
@@ -118,4 +118,4 @@ buttons are dead from earlier experimentation, do one cold power-cycle.
 | `0x04` | bitmap | **buttons** |
 | `0x05` | `0x0C` | unknown |
 
-A DS1307-class **RTC** also sits on this SMBus at **`0x44`**.
+A DS1307-class RTC also sits on this SMBus at **`0x44`**.

@@ -1,15 +1,15 @@
 # Fan control (IT8622 Super-I/O, LPC)
 
-The chassis fan is **not** on the front board at all. It's on the mainboard's
-**IT8622 Super-I/O**, reached over **LPC** — a completely separate chip and bus
-from the LCD (SPI) and the MSP430 (SMBus). See
+The chassis fan is not on the front board. It hangs off the mainboard's
+IT8622 Super-I/O over LPC, a separate chip and bus from the LCD and the
+MSP430. See
 [`hardware.md`](hardware.md#related-but-separate-chassis-fan-control) for
 where this sits relative to the rest of the front-panel hardware.
 
-## Why it needs a module at all
+## Why it needs a module
 
-TrueNAS SCALE does **not** load `it87` by default, and the chip cannot be
-autoprobed — the driver has to poke LPC I/O ports directly to find it. Without
+TrueNAS SCALE does not load `it87` by default, and the chip cannot be
+autoprobed. The driver has to poke LPC I/O ports directly to find it. Without
 the module, there is no `fan*_input` anywhere under `/sys/class/hwmon`, which is
 also why `rn426_panel.py`'s temp page shows **`Fan ?`**: `page_temp()` globs
 every hwmon node for `fan*_input` and simply finds none.
@@ -20,10 +20,8 @@ every hwmon node for `fan*_input` and simply finds none.
 modprobe it87 force_id=0x8622
 ```
 
-Plain `modprobe it87` (no `force_id`) is worth trying first — it may work
-unmodified on some units, and is preferable when it does. `force_id=0x8622`
-is the form confirmed working on this RN426; it is specific to **this
-board's chip**. Do not cargo-cult it onto other hardware — forcing the
+Try plain `modprobe it87` first. `force_id=0x8622` is what's confirmed
+working on this RN426. Do not cargo-cult it onto other hardware. Forcing the
 wrong ID makes the driver talk to a chip that isn't actually there, which
 gets you garbage reads/writes instead of a clean probe failure.
 
@@ -35,23 +33,23 @@ Verified result once loaded: an `it8622` hwmon node appears, exposing:
 | `fan3_input` | `0` | unpopulated header, always reads 0 |
 | `pwm2` / `pwm2_enable` | — | PWM duty + mode control for the chassis fan |
 
-Once `fan2_input` exists, `rn426_panel.py` picks it up with **no code change**
-— `page_temp()` already globs every hwmon for `fan*_input`.
+Once `fan2_input` exists, `rn426_panel.py` picks it up automatically,
+`page_temp()` already globs every hwmon for `fan*_input`.
 
 ## ⚠️ Do not trust the chip's built-in automatic mode
 
 On this chip, `temp1` and `temp3` read a permanent **`-128`C** (disconnected
 sensors). The IT8622's own automatic fan mode chases whichever temp zone
-`pwm2` is bound to — if that's one of the dead `-128`C inputs, the fan
+`pwm2` is bound to, if that's one of the dead `-128`C inputs, the fan
 **pulses/hunts** as the chip's control logic reacts to garbage. That's why
 [`tools/it87-fancontrol.sh`](../tools/it87-fancontrol.sh) ignores auto mode
-entirely and drives `pwm2` in **manual mode** (`pwm2_enable=1`) from a
+and drives `pwm2` in **manual mode** (`pwm2_enable=1`) from a
 userspace curve based on real drive/CPU temps instead.
 
 ## ⚠️ PWM floor
 
 `pwm2` values below **~12** stall the fan outright. `12` is the real floor
-(~858 RPM) — the fan-control script never commands lower than that.
+(~858 RPM), the fan-control script never commands lower than that.
 
 ## The fan-curve script
 
@@ -66,16 +64,16 @@ the exact tunables):
 - Takes CPU package temp (`coretemp`) as a backstop: floor below 58C, full by
   78C.
 - Commands `pwm2` to whichever of the two curves wants more speed.
-- **Slew-limits** the PWM change per tick — up to +10/tick (~4 min floor to
-  full) and down to -4/tick (~10 min full to floor) — so the fan ramps
+- **Slew-limits** the PWM change per tick, up to +10/tick (~4 min floor to
+  full) and down to -4/tick (~10 min full to floor), so the fan ramps
   smoothly instead of jumping.
 - Logs to `$LOG` (default `/var/log/it87-fancontrol.log`, overridable via the
   `LOG` env var) whenever the commanded PWM moves by 4 or more. Writes are
-  infrequent but unbounded over time — if long-term log size matters, add a
+  infrequent but unbounded over time. If long-term log size matters, add a
   logrotate entry for `$LOG` or point `LOG` at a tmpfs path.
 
 > ⚠️ **`pwm2` holds its last value if this script dies.** There is no
-> hardware fallback — see above. That means the script must run under
+> hardware fallback. See above. That means the script must run under
 > something that restarts it, which is exactly what the `systemd-run
 > --property=Restart=always` install recipe below is for; do not run it
 > as a bare backgrounded process. As of this revision the script also
@@ -85,8 +83,8 @@ the exact tunables):
 
 ## Persistence
 
-Do **not** use `/etc/modules`, `/etc/modules-load.d`, or a plain systemd unit
-for the `modprobe` — like everything else on the root filesystem, changes
+Do not use `/etc/modules`, `/etc/modules-load.d`, or a plain systemd unit
+for the `modprobe`. Like everything else on the root filesystem, changes
 there don't survive a SCALE update (SCALE updates into a new boot
 environment, so anything not registered in the config DB is gone). Register
 the module load in the TrueNAS config DB instead:
@@ -97,18 +95,14 @@ the module load in the TrueNAS config DB instead:
 - Command: `modprobe it87 force_id=0x8622`
 - When: **PREINIT**
 
-**PREINIT** is used here mainly because it's tidier — the module is up
-before anything else in boot, so there's nothing to reason about. Timing is
-**not** actually critical: `page_temp()` in `rn426_panel.py` re-globs hwmon
-on every refresh (~5 s), and the fan-curve script itself polls for the
-`it8622` node for up to 60 s before giving up. Both recover fine if the
-module happens to load late, so a POSTINIT `modprobe` would also work — this
-just avoids relying on that retry logic.
+**PREINIT** is just tidier, the timing isn't critical. `page_temp()` re-globs
+hwmon every ~5 s and the fan script polls for the `it8622` node for up to
+60 s, so a POSTINIT `modprobe` would also work.
 
 ### Installing the fan-curve script itself
 
 Install `tools/it87-fancontrol.sh` as a **POSTINIT** init script the same way
-`install.sh` registers the panel daemon — via `systemd-run`, so it survives
+`install.sh` registers the panel daemon, via `systemd-run`, so it survives
 reboots without needing a unit file on the root filesystem (changes there
 don't survive a SCALE update):
 

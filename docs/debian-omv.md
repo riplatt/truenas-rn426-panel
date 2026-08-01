@@ -1,7 +1,7 @@
 # Running on plain Debian / OMV
 
-**Hardware requirement is unchanged** — this is still only for a ReadyNAS
-RN426 / RN526 / RN626X. This page is about running a different **OS** on
+Hardware requirement is unchanged. This is still only for a ReadyNAS
+RN426 / RN526 / RN626X. This page is about running a different OS on
 that same front board, not different hardware; for different hardware see
 [`porting.md`](porting.md).
 
@@ -31,7 +31,7 @@ The unit already covers loading the i2c modules (`ExecStartPre` runs
 
 - The DejaVu font paths in `LCD.__init__` are hard-coded to
   `/usr/share/fonts/truetype/dejavu/`. `fonts-dejavu-core` installs them
-  there on Debian — just confirm the files exist if you're on a derivative
+  there on Debian. Just confirm the files exist if you're on a derivative
   that packages fonts differently.
-- It must run as root — `/dev/mem`, `/dev/port` and `/dev/i2c` all require
+- It must run as root. `/dev/mem`, `/dev/port` and `/dev/i2c` all require
   it. The unit runs as root by default; don't add a `User=` line.

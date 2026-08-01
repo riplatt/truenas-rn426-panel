@@ -1,26 +1,26 @@
 # Porting to other ReadyNAS models
 
 This driver targets the **RN426 / RN526 / RN626X** front board. The same approach
-should work for other Denverton- or Atom-based ReadyNAS units, but the **GPIO pad
-addresses and possibly the display controller differ per model**. Here's how to
+should work for other Denverton- or Atom-based ReadyNAS units, but the GPIO pad
+addresses and possibly the display controller differ per model. Here's how to
 adapt it.
 
-> Looking to run a different **OS** (plain Debian / OMV) on this *same*
-> hardware instead? That's not porting — see
+> If you're looking to run a different OS (plain Debian / OMV) on this
+> *same* hardware, that's not porting, see
 > [`debian-omv.md`](debian-omv.md).
 
 ## 1. Confirm the display path
 
 Two things to check on your unit:
 
-- **`i2cdetect -y <i801-bus>`** — is there an MCU around `0x1c` (and maybe an RTC
+- **`i2cdetect -y <i801-bus>`**. Is there an MCU around `0x1c` (and maybe an RTC
   at `0x44`)? That's the button/LED controller.
 - Pull the official firmware for *your* model and reconstruct symbols (see
   [`reverse-engineering.md`](reverse-engineering.md)). Check whether your model
   uses the **`oled` (SSD130x SPI)** path or the **HD44780 (parallel)** path:
   - SSD130x → `oled_probe` / `spi_send` / `init_oled` (this driver's approach).
   - HD44780 → `hd44780_lcd_probe` / `lcm_write4` / `lcd_init` (a different,
-    4-bit parallel bit-bang — same idea, different pins and command set).
+    4-bit parallel bit-bang, same idea, different pins and command set).
 
 ## 2. Find your model's pad map
 
@@ -40,7 +40,7 @@ MOSI / CLK / D/C / CS / EN / RESET  ->  PADCFG_DW0 physical addresses
 
 Plug those into `LCD.__init__` in `rn426_panel.py`.
 
-> Models on a **different SoC** (older ReadyNAS on a non-Denverton chip) will have
+> Models on a different SoC (older ReadyNAS on a non-Denverton chip) will have
 > different GPIO community base addresses and a different P2SB/sideband scheme.
 > The button side (MSP430 over SMBus) is more likely to be portable as-is.
 
@@ -49,7 +49,7 @@ Plug those into `LCD.__init__` in `rn426_panel.py`.
 Dump your firmware's `init_oled` table. If your panel is a different size
 (e.g. 128×64), adjust the page count in `LCD.show` (`range(4)` → `range(8)`) and
 the mux/addressing bytes accordingly. Remember the table likely **omits
-display-on** — send `0xAF` after init.
+display-on**, send `0xAF` after init.
 
 ## 4. Buttons
 
