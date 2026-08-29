@@ -162,6 +162,49 @@ else
 fi
 
 section "7. GPIO (read-only)"
+echo "-- loaded GPIO modules --"
+if have lsmod; then
+    lsmod | grep -iE 'gpio|lpc_ich' || echo "  (nothing matched 'gpio' or 'lpc_ich')"
+else
+    echo "  lsmod: not installed"
+fi
+
+echo
+echo "-- gpiochips via /sys/bus/gpio (the one that works on current kernels) --"
+found_chip=0
+if [ -d /sys/bus/gpio/devices ]; then
+    for c in /sys/bus/gpio/devices/gpiochip*; do
+        [ -e "$c" ] || continue
+        found_chip=1
+        label="<unreadable>"
+        ngpio="?"
+        [ -r "$c/label" ] && label=$(cat "$c/label" 2>/dev/null)
+        [ -r "$c/ngpio" ] && ngpio=$(cat "$c/ngpio" 2>/dev/null)
+        tag=""
+        case "$label" in
+            *gpio_ich*|*gpio-ich*) tag="  <-- gpio_ich, the controller the non-RN426 models use" ;;
+            *gpio_dnv*|*INT34C*)   tag="  <-- Denverton SoC GPIO, same family as the RN426" ;;
+        esac
+        printf '  %s: label=%s ngpio=%s%s\n' "$(basename "$c")" "$label" "$ngpio" "$tag"
+    done
+    [ "$found_chip" -eq 1 ] || echo "  (no gpiochip devices bound)"
+else
+    echo "  /sys/bus/gpio/devices not present"
+fi
+
+echo
+echo "-- gpiodetect (libgpiod) --"
+if have gpiodetect; then
+    gpiodetect 2>&1 | sed 's/^/  /'
+else
+    echo "  gpiodetect: not installed (Debian package 'gpiod')."
+    echo "  ReadyNAS OS6 is Jessie-based and too old for it. If that's what you're"
+    echo "  running, boot a live USB instead -- GRML works fine -- and run this"
+    echo "  script from there."
+fi
+
+echo
+echo "-- legacy /sys/class/gpio (deprecated, and empty on current kernels) --"
 if [ -d /sys/class/gpio ]; then
     for c in /sys/class/gpio/gpiochip*; do
         [ -e "$c" ] || continue
@@ -173,7 +216,42 @@ if [ -d /sys/class/gpio ]; then
     done
     ls /sys/class/gpio 2>/dev/null | sed 's/^/  entry: /'
 else
-    echo "  /sys/class/gpio not present"
+    echo "  /sys/class/gpio not present (normal on a current kernel)"
+fi
+
+if [ "$found_chip" -eq 0 ]; then
+    echo
+    echo "  *** NO GPIO CONTROLLER IS BOUND RIGHT NOW. ***"
+    echo "  This is NOT a negative result. The gpio-ich driver does not load by"
+    echo "  itself, so an empty list here tells us nothing either way."
+    echo
+    echo "  To get the answer that actually matters, run these two commands by"
+    echo "  hand and paste the output into your issue:"
+    echo
+    echo "      sudo modprobe lpc_ich gpio-ich"
+    echo "      gpiodetect"
+    echo
+    echo "  A chip labelled gpio_ich means this driver should port to your model"
+    echo "  without any of the register poking the RN426 needs."
+    echo
+    echo "  This script will not run that modprobe for you. It is strictly"
+    echo "  read-only by design -- see the safety note at the top of the file."
+    echo "  If modprobe fails, check the dmesg lines below for"
+    echo "  \"gpio_ich: ACPI BAR is busy\". That one is usually fixed by booting"
+    echo "  with acpi_enforce_resources=lax on the kernel command line."
+fi
+
+echo
+echo "-- dmesg lines mentioning gpio / lpc / p2sb (needs root on most systems) --"
+if have dmesg; then
+    dmesg_gpio=$(dmesg 2>/dev/null | grep -iE 'gpio|lpc_ich|p2sb' | tail -20)
+    if [ -n "$dmesg_gpio" ]; then
+        printf '%s\n' "$dmesg_gpio" | sed 's/^/  /'
+    else
+        echo "  (no matching lines, or dmesg is not readable as this user)"
+    fi
+else
+    echo "  dmesg: not installed"
 fi
 
 section "8. Front panel state"
@@ -192,6 +270,11 @@ echo "     that identifies the board revision (e.g. this project's board reads"
 echo "     \"RN526&RN626X Front Board V20\"). It's on the small board behind the"
 echo "     front bezel, connected to the mainboard by a ribbon cable."
 echo "  3. What the front-panel LCD is currently displaying (see section 8 above)."
+echo "  4. If section 7 said NO GPIO CONTROLLER IS BOUND, the output of:"
+echo "         sudo modprobe lpc_ich gpio-ich && gpiodetect"
+echo "     This script will not load that module itself. Whether a chip"
+echo "     labelled gpio_ich appears is the single most useful thing you can"
+echo "     tell us, and a negative answer is just as useful as a positive one."
 hr
 }
 
