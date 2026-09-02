@@ -1,7 +1,14 @@
 #!/usr/bin/env python3
 """
-RN426 front-panel driver for TrueNAS SCALE running on NETGEAR ReadyNAS RN426
-(and RN526/RN626, which share the "RN526&RN626X Front Board V20").
+RN426/RN428 front-panel driver for TrueNAS SCALE on the NETGEAR ReadyNAS RN426
+and RN428 (one board, two models -- the stock firmware drives both from the
+same "rn426_8" config struct).
+
+NOT for the RN526/RN626X. They share the front board but not the SoC: their
+panel GPIOs hang off a C224-chipset gpio_ich controller, not the Denverton
+pads this driver writes, so running it there pokes unrelated registers (see
+issue #4 and docs/porting.md). The driver refuses to start on a non-Denverton
+CPU; RN_MODEL=rn426 overrides the check if you know better.
 
 It drives the 128x32 SSD1305 graphic LCD by bit-banging SPI over the Intel
 Denverton (Atom C3000) SoC GPIO pads via /dev/mem, and reads the 5-way
@@ -16,7 +23,29 @@ Env:    RN_SLEEP = idle seconds before the display sleeps (default 90; 0 = never
 Requires: python3-pil (Pillow) and the DejaVu fonts (both ship with TrueNAS SCALE),
           i2c-dev + i2c-i801 kernel modules, and root (for /dev/mem, /dev/port, i2c).
 """
-import mmap, struct, time, socket, subprocess, os, fcntl, ctypes, glob, sys
+import mmap, struct, time, socket, subprocess, os, fcntl, ctypes, glob, sys, re
+
+def denverton_check():
+    """Refuse to start on a non-Denverton CPU. The LCD path writes hard-coded
+    Denverton pad addresses through /dev/mem; on any other machine (the
+    RN526/RN626X included, see issue #4) those addresses belong to something
+    else entirely and writing them is a blind register poke. The RN426/RN428
+    are Atom C3538, so the Atom C3000 family (C3xxx) is the gate."""
+    if os.environ.get("RN_MODEL", "") == "rn426":
+        return
+    try:
+        cpu = open("/proc/cpuinfo").read()
+    except OSError:
+        cpu = ""
+    m = re.search(r"^model name\s*:\s*(.*)$", cpu, re.M)
+    name = m.group(1).strip() if m else "<unknown>"
+    if re.search(r"\bC3\d{3}\b", name):
+        return
+    sys.exit(
+        "refusing to start: CPU is '%s', not an Intel Atom C3000 (Denverton).\n"
+        "This driver only supports the ReadyNAS RN426/RN428. On other models its\n"
+        "/dev/mem writes land on unrelated hardware -- see docs/porting.md for\n"
+        "the porting story. Set RN_MODEL=rn426 to override if you know better." % name)
 
 # --------------------------------------------------------------------------
 # P2SB unhide -- pure Python PCI-config write via /dev/port (no helper binary).
@@ -277,6 +306,7 @@ def run():
         time.sleep(0.005)                   # 200 Hz pad-watch; /dev/mem only, no i2c, never wedges the MCU
 
 def main():
+    denverton_check()
     mode = sys.argv[1] if len(sys.argv) > 1 else "run"
     if mode == "sleep":
         p2sb_unhide(); lcd = LCD()
