@@ -130,6 +130,35 @@ button. Keep the MCU **read-only** unless you've verified its control register i
 safe to write (see the `reg 0x02` warning in
 [`buttons-protocol.md`](buttons-protocol.md)).
 
+## Prior art: legacy models already covered elsewhere
+
+Probe reports (issues #5 to #9) and forum links turned up existing projects
+for the older units, so check these before porting anything here:
+
+- **Pro6 / RNDU6000**: the LCD is not GPIO at all. It's a serial device on
+  `/dev/ttyS1` (128x32, simple text protocol), and
+  [berouques/rndu6000_lcd_status](https://github.com/berouques/rndu6000_lcd_status)
+  already drives it under Debian / OMV with plain bash.
+- **Ultra 4 / RNDU4000**: [fmor/rndu4000](https://github.com/fmor/rndu4000) is a
+  kernel module for the LCD, LEDs and buttons (ICH9 LPC).
+- **RN314**: a fork of the above,
+  [psyrykh/readynas-rn314](https://github.com/psyrykh/readynas-rn314)
+  (set `LPC_DEVICE_ID` to `0x3a18`).
+
+This project stays focused on the RN426/428 and, next, the 52x/62x gpio_ich
+route.
+
+## Live-boot notes for probing
+
+- ReadyNAS OS6 is Jessie-based: no `gpiod`, no `i2c-tools` by default. Boot a
+  live USB to probe properly.
+- The GRML 2026 image will not legacy-BIOS boot these machines. **GRML 25.12
+  works.** (Reported by portalman on the Pro6 and RN516.)
+- Debian kernels (bookworm and trixie, so also TrueNAS SCALE / OMV / GRML) do
+  **not ship `gpio-ich.ko`** at all. `modprobe gpio-ich` failing there is
+  expected and tells you nothing about the hardware. The stock OS6 kernel does
+  bind `gpio_ich`, so its dmesg is the more useful evidence.
+
 ## Contributing
 
 Not sure yet whether your model can even use this driver, or which of the
