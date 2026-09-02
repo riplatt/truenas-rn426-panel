@@ -1,8 +1,15 @@
 # truenas-rn426-panel
 
 A front-panel driver that gets the LCD and navigation buttons working
-on a NETGEAR ReadyNAS RN426 (and the related RN526 / RN626X, which share the
-same front board) running TrueNAS SCALE.
+on a NETGEAR ReadyNAS RN426 or RN428 running TrueNAS SCALE.
+
+Earlier versions of this page also claimed the RN526 / RN626X, on the grounds
+that they share the same front board. That was wrong. The buttons do live on
+the front board and should carry over, but the LCD is driven from the host
+CPU's own GPIO pads, and probe reports from a real 528X and 628X show a
+Pentium D1508 / Xeon D-1521 on a C224 chipset, not the Atom C3538 this
+driver's hard-coded addresses belong to. On those machines the LCD half of
+this driver does nothing. See issue #4 and docs/porting.md.
 
 When you install TrueNAS on this hardware, the little front display stays frozen
 on **`Booting...`** forever and the buttons do nothing. TrueNAS has no
@@ -56,7 +63,7 @@ Super-I/O, not the front board.
 
 ## Requirements
 
-- A ReadyNAS RN426 / RN526 / RN626X. This list assumes TrueNAS SCALE. If
+- A ReadyNAS RN426 or RN428. This list assumes TrueNAS SCALE. If
   you're running plain Debian or OMV instead, see the "Running on plain
   Debian / OMV" section below.
 - `python3` + Pillow (`python3-pil`) and the DejaVu fonts, both ship
@@ -125,8 +132,7 @@ Customize the pages by editing the `page_*()` functions and the `PAGES` list in
 ## Running on plain Debian / OMV
 
 Hardware requirement is unchanged. This is still only for a ReadyNAS
-RN426 / RN526 / RN626X, just running a different OS on the same front
-board. Nothing in the driver is TrueNAS-specific (it talks to `/dev/mem`,
+RN426 or RN428, just running a different OS on the same hardware. Nothing in the driver is TrueNAS-specific (it talks to `/dev/mem`,
 `/dev/port` and `/dev/i2c` directly); the only TrueNAS-specific piece is
 `install.sh`. See [`docs/debian-omv.md`](docs/debian-omv.md) for the install
 steps.
