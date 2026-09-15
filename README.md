@@ -11,6 +11,20 @@ Pentium D1508 / Xeon D-1521 on a C224 chipset, not the Atom C3538 this
 driver's hard-coded addresses belong to. On those machines the LCD half of
 this driver does nothing. See issue #4 and docs/porting.md.
 
+## Model support
+
+| Model | Display | Buttons | Status |
+|---|---|---|---|
+| RN426 / RN428 | yes | yes | working |
+| RN316 | yes | not yet | experimental, display confirmed by one tester (issue #2) |
+| RN528X / RN628X | untested | untested | experimental, in bring-up (issue #10) |
+
+The RN316 and 528X/628X use a different GPIO controller (`gpio_ich`) and a
+separate code path. The RN316 buttons are a capacitive touch wheel on a
+different chip from the RN426's, so for now that model runs display-only
+with the pages rotating on a timer. Both experimental models print a warning
+at startup.
+
 When you install TrueNAS on this hardware, the little front display stays frozen
 on **`Booting...`** forever and the buttons do nothing. TrueNAS has no
 driver for NETGEAR's front board. This project is that driver, reverse-engineered
