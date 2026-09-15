@@ -26,6 +26,18 @@
 # poke that can wedge a sleeping MCU. It also runs that scan exactly ONCE per
 # bus -- no loops, no polling.
 #
+# ONE exception to "read-only scan": on i801 adapters, a single targeted
+# default-mode (quick-write) probe of address 0x2b, the RN316's SX8635
+# touch-wheel controller. That chip does not answer the read-byte probe
+# above at all (i2cdetect -r reports it absent even when it's there), so a
+# scan that only ever read-byte-probes gives a false negative on the one
+# board that has it. This is safe on every board: 0x2b is absent on the
+# MSP430-based boards this driver already targets, so the probe there is
+# just a harmless NAK; and on the RN316 itself, a tester already ran a full
+# unrestricted default-mode `i2cdetect -y` scan with no adverse effect, so
+# a probe restricted to just this one address is known-safe there too. See
+# docs/porting.md for the writeup.
+#
 # On the RN426 family this is low-risk (this driver's own tooling does the
 # same read-byte probe) but it is not proven zero-risk on an unknown board,
 # which is the whole reason this script exists. If your buttons stop
@@ -129,6 +141,17 @@ if have i2cdetect; then
     fi
 else
     echo "  i2cdetect: not installed (part of i2c-tools) -- skipping i2c bus scan"
+fi
+
+echo
+echo "-- SX8635 default address, quick-write probe (this chip does not answer read-byte probes) --"
+if have i2cdetect && [ -n "$i801_buses" ]; then
+    for bus in $i801_buses; do
+        echo "  bus $bus, address 0x2b only:"
+        i2cdetect -y "$bus" 0x2b 0x2b 2>&1 | sed 's/^/    /'
+    done
+else
+    echo "  no i801 adapter found (or i2cdetect missing) -- nothing to probe here"
 fi
 
 section "5. hwmon (fan control side)"

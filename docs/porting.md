@@ -130,6 +130,58 @@ button. Keep the MCU **read-only** unless you've verified its control register i
 safe to write (see the `reg 0x02` warning in
 [`buttons-protocol.md`](buttons-protocol.md)).
 
+## RN316 buttons (SX8635)
+
+The RN316 front board doesn't have the RN426/RN428 family's MSP430 button
+MCU. Instead it has a capacitive wheel plus an OK button driven by a
+Semtech SX8635 touch controller, at i2c address 0x2b on the same i801
+SMBus the RN426 boards use for their MSP430.
+
+A few things worth knowing before you touch it:
+
+- **rn-probe's default scan doesn't see this chip.** The `-r` (read-byte)
+  scan `rn-probe.sh` runs is deliberately gentle, but the SX8635 doesn't
+  answer that probe mode at all, so it shows up as absent even when it's
+  there. `rn-probe.sh` now also runs one targeted default-mode (quick-write)
+  probe of address 0x2b on i801 adapters, which does see it. That probe is
+  restricted to just this one address, is a harmless NAK on boards that
+  don't have this chip, and a full unrestricted default-mode scan has
+  already been run against a real RN316 with no ill effect.
+
+- **NIRQ is gpio_ich line 2, active-low.** Confirmed from the stock
+  firmware's own GPIO request for this pin: it's requested under the name
+  `"SX8635_NIRQ"` (see `.claude/advice/sx8635-re-report.md` part (c)), and
+  its own NIRQ-state callback treats a raw value of 0 as asserted.
+
+- **The stock vendor driver polls the chip rather than servicing the IRQ.**
+  `sx8635.ko` never calls `request_irq`; it runs a workqueue timer and
+  checks the NIRQ pin as a level gate for whether to bother reading over
+  i2c that tick. GPIO 2 is wired up, but nothing in the stock kernel treats
+  it as an edge-triggered interrupt source through the Linux IRQ subsystem.
+
+- **Booting needs `acpi_mask_gpe=0x12` on the kernel cmdline.** GPE (n+0x10)
+  corresponds to GPIO n, so GPE 0x12 is GPIO 2, this chip's NIRQ line. If
+  NIRQ is left unserviced it level-asserts (probably from the very first
+  touch or auto-compensation event after power-up) and stays asserted
+  forever, which storms ACPI GPEs on a generic Linux kernel that enables
+  every GPE it finds in the DSDT by default. `0x1B` has also been reported
+  needing masking on some units; the reason for that one is unexplained and
+  unconfirmed, but masking it is harmless either way.
+
+- **Never write registers 0xB1 or the NVM-burn sequence (0xAC/0xAD then the
+  0xA5/0x5A pulse on 0x0E).** 0xB1 is a soft reset with no real upside for
+  a read-only or SPM-only path; the NVM burn is permanent (up to 3 times)
+  and completely unnecessary here since the chip's working config (SPM) is
+  volatile and reloads fine after a power cycle. See
+  `.claude/advice/sx8635-buttons-design.md` (Q1/Q2) for the full reasoning.
+
+- **For live diagnosis, use `tools/sx8635-watch.py`.** It's a strictly
+  read-only tool: it dumps the chip's status registers, then walks a
+  tester through touch and wheel-rotation phases while tracing IrqSrc and
+  the touch/slider registers, and ends with a verdict on whether the
+  read-only button path already works or needs more (see the design doc's
+  Q6 for the decision table it implements).
+
 ## Prior art: legacy models already covered elsewhere
 
 Probe reports (issues #5 to #9) and forum links turned up existing projects
