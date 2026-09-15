@@ -15,8 +15,8 @@ NOT for any other model. The two backends above write hard-coded SoC
 register addresses (Denverton PADCFG_DW0 via /dev/mem, or ICH I/O ports via
 /dev/port); on a different chipset either one pokes unrelated hardware (see
 issue #4 and docs/porting.md). The driver refuses to start on unrecognized
-hardware; RN_MODEL=rn426 or RN_MODEL=rnx26 overrides the check if you know
-better.
+hardware; RN_MODEL=rn426, RN_MODEL=rnx26 or RN_MODEL=rn316 overrides the
+check if you know better.
 
 It drives the 128x32 SSD1305 graphic LCD by bit-banging SPI over SoC GPIO,
 and reads the 5-way navigation buttons from the front-board MSP430
@@ -26,7 +26,7 @@ See docs/ for the full reverse-engineering writeup and protocol details.
 
 Usage:  rn426_panel.py [run|sleep|wake]
 Env:    RN_SLEEP = idle seconds before the display sleeps (default 90; 0 = never)
-        RN_MODEL = force model detection (rn426 / rnx26)
+        RN_MODEL = force model detection (rn426 / rnx26 / rn316)
 
 Requires: python3-pil (Pillow) and the DejaVu fonts (both ship with TrueNAS SCALE),
           i2c-dev + i2c-i801 kernel modules, and root (for /dev/mem, /dev/port, i2c).
@@ -63,6 +63,8 @@ def p2sb_unhide():
 # does so for EN -- see en_can_pulse below.
 # --------------------------------------------------------------------------
 class Gpio:
+    has_buttons = True   # overridden False by backends/models with no known MCU interrupt line
+
     def idle(self):
         for sig, v in [("CS", 1), ("RST", 1), ("CLK", 0), ("MOSI", 0), ("DC", 0)]:
             self.set(sig, v)
@@ -78,7 +80,12 @@ class DnvMmioGpio(Gpio):
     NORTH, SOUTH = 0xFDC20000, 0xFDC50000
     en_can_pulse = True   # Dnv init() pulses EN low then high; see LCD.init()
 
-    def __init__(self):
+    def __init__(self, spec=None):
+        # spec (the model's whole MODELS[...] dict) is accepted and ignored,
+        # so _build can construct every backend the same way regardless of
+        # what a given model's spec carries: spec["backend"](spec). The Dnv
+        # backend's six PADCFG addresses below are hardcoded to this one
+        # board, not derived from a pin map or an lpc_id/ngpio pair.
         p2sb_unhide()
         self._fN = open("/dev/mem", "r+b"); self.mN = mmap.mmap(self._fN.fileno(), 0x1000, offset=self.NORTH)
         self._fS = open("/dev/mem", "r+b"); self.mS = mmap.mmap(self._fS.fileno(), 0x1000, offset=self.SOUTH)
@@ -135,39 +142,107 @@ def _parse_gpiobase(cfg_bytes):
         raise RuntimeError("GPIOBASE is 0 -- LPC GPIO I/O space not enabled, check BIOS/ACPI settings")
     return base
 
+def _check_lpc_id(actual, expected):
+    """Pure check, no I/O: the LPC bridge's PCI device id must match the id
+    this model's pin map was derived for. A pin map is meaningless (and
+    dangerous to write) on a different chipset -- catch that BEFORE opening
+    /dev/port, not after the first write."""
+    if actual != expected:
+        raise RuntimeError(
+            "LPC device id 0x%04x does not match this model's expected "
+            "0x%04x -- wrong pin map for this hardware, refusing to guess"
+            % (actual, expected))
+
+def _check_gpio_en(gc_byte):
+    """Pure check, no I/O: bit 4 (GPIO_EN) of the LPC Configuration (GC)
+    register at PCI config offset 0x4C must be set, or the gpio_ich I/O-port
+    window this driver writes isn't even decoded by the chipset."""
+    if not (gc_byte & 0x10):
+        raise RuntimeError("GPIO decode disabled (LPC cfg 0x4C bit 4 clear)")
+
+def _check_ngpio(pins, ngpio):
+    """Pure check, no I/O: every configured gpio_ich line (BTN_INT included,
+    when it isn't None) must be < ngpio, the line count this chipset's
+    gpio_ich block actually implements -- otherwise _ich_line_addr would
+    compute a bank/byte that doesn't exist on this hardware."""
+    for name, line in pins.items():
+        if line is not None and line >= ngpio:
+            raise ValueError(
+                "pin %s uses gpio_ich line %d but this model has only %d "
+                "lines (ngpio)" % (name, line, ngpio))
+
 class IchPortGpio(Gpio):
-    """528X/628X backend: ICH/PCH I/O-port GPIO (gpio_ich), NOT the Denverton
-    PADCFG_DW0 the RN426 backend uses.
+    """ICH/PCH I/O-port GPIO backend (gpio_ich), NOT the Denverton PADCFG_DW0
+    the RN426 backend uses. Shared by every gpio_ich-based model (rnx26,
+    rn316, ...); what differs per model is just the pin map passed in.
 
     This driver only ever touches GP_LVL (the output/level register) --
     never USE_SEL/IO_SEL/GP_RST_SEL or the blink registers. Bring-up tooling
     (docs/porting.md) is responsible for confirming those are already
     configured as GPIO output/input before this driver runs.
 
-    CRITICAL INVARIANT: EN (line 6) and RESET (line 7, called RST here to
-    match the Gpio.set()/idle() vocabulary shared with the Dnv backend) live
-    in the same byte as CLK: bank0 byte0, GPIOBASE+0x0C. On the RN426 those
-    two lines wedge the front-board MSP430 out of button-reporting mode if
-    ever driven low, recoverable only by a full AC power-cycle. We assume
-    the same risk here since it's the same front-board MCU family. So every
-    write to bank0 byte0 unconditionally forces bits 6 and 7 high, no matter
-    what was asked for -- see _set_line. en_can_pulse=False also tells
-    LCD.init() not to even attempt to lower EN.
+    CRITICAL INVARIANT: EN and RESET must never be driven low. On the RN426
+    front-board MSP430, and assumed by extension on every other model that
+    shares that MCU family, driving either line low wedges button-reporting,
+    recoverable only by a full AC power-cycle. So this backend derives, from
+    the pin map, every GP_LVL byte that contains EN or RST and unconditionally
+    forces those bits high on EVERY write to that byte, no matter what was
+    asked for -- see _derive_maps/_wr_byte. set("EN", 0) and set("RST", 0)
+    are thereby no-ops. en_can_pulse=False also tells LCD.init() not to even
+    attempt to lower EN.
     """
     en_can_pulse = False
-    # gpio_ich line numbers (rnx26 config struct, docs/porting.md).
-    MOSI, CLK, DC, CS, EN, RST, BTN_INT = 54, 1, 32, 50, 6, 7, 2
+    SIGS = ("MOSI", "CLK", "DC", "CS", "EN", "RST")   # the six output signals
 
-    def __init__(self):
+    def __init__(self, spec):
+        # spec is the model's whole MODELS[...] dict; this backend only
+        # looks at "pins", "lpc_id" and "ngpio". Passing the whole dict
+        # (rather than three positional args) keeps _build's construction
+        # uniform across backends and leaves room for the spec to grow.
+        pins = spec["pins"]
+        # pins: {"MOSI","CLK","DC","CS","EN","RST","BTN_INT"} -> gpio_ich
+        # line number, per model (see MODELS). BTN_INT may be None if no
+        # interrupt line is known for this model (buttons unavailable).
+        self.pins = pins
+        self.has_buttons = pins["BTN_INT"] is not None
+        self.ngpio = spec["ngpio"]
+
+        # Identity check BEFORE opening /dev/port: refuse to bit-bang a
+        # chipset this pin map wasn't derived for.
+        with open("/sys/bus/pci/devices/0000:00:1f.0/device") as f:
+            device = int(f.read().strip(), 16)
+        _check_lpc_id(device, spec["lpc_id"])
+
         with open("/sys/bus/pci/devices/0000:00:1f.0/config", "rb") as f:
-            cfg = f.read(0x4C)          # enough to cover the GPIOBASE dword at 0x48
+            cfg = f.read(0x4D)          # covers GPIOBASE (0x48) and GC (0x4C)
+        if len(cfg) < 0x4D:
+            raise RuntimeError("PCI config read too short to contain the GC register (offset 0x4C)")
         self.gpiobase = _parse_gpiobase(cfg)
+        _check_gpio_en(cfg[0x4C])
+
         self._pf = open("/dev/port", "r+b", buffering=0)
         self._fd = self._pf.fileno()
+        self._derive_maps()
 
-    def _whitelist(self):
-        # The only three GP_LVL bytes this driver is allowed to touch.
-        return {self.gpiobase + 0x0C, self.gpiobase + 0x38, self.gpiobase + 0x3A}
+    def _derive_maps(self):
+        # Everything the choke point needs, derived once from self.pins:
+        #   _sig:       signal name -> (port, bit) for the six outputs.
+        #   _whitelist: the set of GP_LVL bytes those six outputs live in --
+        #               the ONLY bytes _wr_byte will accept.
+        #   _force:     port -> bitmask that must be ORed into every write
+        #               to that port, built from EN's and RST's bits. This
+        #               is what turns the CRITICAL INVARIANT above into
+        #               "any byte containing EN or RST" instead of a
+        #               hardcoded "bank0 byte0, bits 6|7".
+        # BTN_INT is read-only and deliberately left out of _sig/_whitelist;
+        # reads aren't restricted by the choke point either way.
+        _check_ngpio(self.pins, self.ngpio)
+        self._sig = {s: _ich_line_addr(self.gpiobase, self.pins[s]) for s in self.SIGS}
+        self._whitelist = {port for port, _bit in self._sig.values()}
+        self._force = {}
+        for s in ("EN", "RST"):
+            port, bit = self._sig[s]
+            self._force[port] = self._force.get(port, 0) | (1 << bit)
 
     def _rd_byte(self, port):
         return os.pread(self._fd, 1, port)[0]
@@ -179,32 +254,34 @@ class IchPortGpio(Gpio):
 
     def _wr_byte(self, port, val):
         # Choke point: this is the ONLY place that writes /dev/port, and it
-        # only accepts these three whitelisted bytes. That is what makes the
-        # EN/RESET invariant above enforceable in one spot, not scattered.
-        if port not in self._whitelist():
+        # only accepts whitelisted bytes, with the EN/RESET force mask
+        # applied right here -- so no future caller (set(), a bring-up
+        # script, whatever) can write one of these bytes without it.
+        if port not in self._whitelist:
             raise ValueError("refusing to write non-whitelisted ICH GPIO port 0x%x" % port)
+        val |= self._force.get(port, 0)
         os.pwrite(self._fd, bytes([val & 0xFF]), port)
 
-    def _set_line(self, line, val):
-        port, bit = _ich_line_addr(self.gpiobase, line)
+    def set(self, sig, val):
+        port, bit = self._sig[sig]
         cur = self._rd_byte(port)
         if val & 1:
             cur |= (1 << bit)
         else:
             cur &= ~(1 << bit)
-        if port == self.gpiobase + 0x0C:     # bank0 byte0: EN and RESET live here too
-            cur |= (1 << 6) | (1 << 7)       # force EN, RESET high, always, no exceptions
-        self._wr_byte(port, cur & 0xFF)
-
-    def set(self, sig, val):
-        self._set_line(getattr(self, sig), val)
+        self._wr_byte(port, cur & 0xFF)   # force mask applied inside _wr_byte
 
     def int_active(self):
-        # BTN_INT (line 2, bank0 byte0 bit 2). Active-low assumed by analogy
-        # with the Dnv backend's interrupt pad; NOT yet confirmed on real
-        # 528X/628X hardware -- check GPI_INV in the stage-A register dump
-        # (docs/porting.md) before trusting this.
-        port, bit = _ich_line_addr(self.gpiobase, self.BTN_INT)
+        btn_int = self.pins["BTN_INT"]
+        if btn_int is None:
+            # No interrupt line known for this model -- buttons disabled,
+            # this driver is display-only here.
+            return False
+        # Active-low assumed by analogy with the Dnv backend's interrupt
+        # pad; NOT yet confirmed on real gpio_ich hardware -- check
+        # GPI_INV in the stage-A register dump (docs/porting.md) before
+        # trusting this.
+        port, bit = _ich_line_addr(self.gpiobase, btn_int)
         return ((self._rd_byte(port) >> bit) & 1) == 0
 
 # SSD1305 init (33 bytes). NOTE: contains no display-on; 0xAF is sent after.
@@ -383,6 +460,7 @@ MODELS = {
         "backend": DnvMmioGpio,
         "geometry": (4, 132),
         "init_seq": INIT_SEQ,
+        "pins": None,   # Dnv backend ignores pins, see DnvMmioGpio.__init__
     },
     "rnx26": {
         # ReadyNAS 528X/628X (C224 chipset, gpio_ich). EXPERIMENTAL: this
@@ -393,6 +471,25 @@ MODELS = {
         "backend": IchPortGpio,
         "geometry": (4, 132),
         "init_seq": INIT_SEQ,
+        # gpio_ich line numbers, rnx26 config struct (docs/porting.md).
+        "pins": {"MOSI": 54, "CLK": 1, "DC": 32, "CS": 50, "EN": 6, "RST": 7, "BTN_INT": 2},
+        "lpc_id": 0x8c54,   # C224 "Lynx Point" LPC bridge
+        "ngpio": 76,        # gpio-ich.c ICH_V9 line count for this PCH
+    },
+    "rn316": {
+        # RN316 (Atom D2701, ICH10 LPC 8086:3a18, gpio_ich 61 lines). Pin map
+        # taken from the stock firmware rn316 config struct (docs/porting.md).
+        # Init table is reused from the RN426 and UNVERIFIED on this panel.
+        # Buttons are unknown on this generation -- the probe found no MSP430
+        # at 0x1c, possibly an SX8635 captouch instead -- so BTN_INT is None
+        # and this driver is display-only here. EN/RST wedge risk is
+        # unconfirmed on this front board but treated as real anyway.
+        "backend": IchPortGpio,
+        "geometry": (4, 132),
+        "init_seq": INIT_SEQ,
+        "pins": {"MOSI": 21, "CLK": 19, "DC": 16, "CS": 7, "EN": 32, "RST": 24, "BTN_INT": None},
+        "lpc_id": 0x3a18,   # ICH10 LPC bridge
+        "ngpio": 61,        # gpio-ich.c ICH_V5/ICH10 line count
     },
 }
 
@@ -428,62 +525,83 @@ def detect_model(cpuinfo_reader=None, dmi_reader=None):
         product = ""
     if product in ("ReadyNAS 528X", "ReadyNAS 628X"):
         return "rnx26"
+    if product == "ReadyNAS 316":
+        return "rn316"
 
     sys.exit(
         "refusing to start: CPU is '%s', DMI product is '%s' -- neither matches\n"
-        "a known ReadyNAS model (Atom C3000/Denverton for RN426/RN428, or a\n"
-        "528X/628X product name for the experimental gpio_ich path). This\n"
-        "driver only supports those. See docs/porting.md for the porting\n"
-        "story. Set RN_MODEL=rn426 or RN_MODEL=rnx26 to override if you know\n"
-        "better." % (cpu_name, product or "<unknown>"))
+        "a known ReadyNAS model (Atom C3000/Denverton for RN426/RN428, a\n"
+        "528X/628X product name for the experimental gpio_ich path, or a\n"
+        "ReadyNAS 316 product name for the experimental, display-only RN316\n"
+        "gpio_ich path). This driver only supports those. See docs/porting.md\n"
+        "for the porting story. Set RN_MODEL=rn426, RN_MODEL=rnx26 or\n"
+        "RN_MODEL=rn316 to override if you know better."
+        % (cpu_name, product or "<unknown>"))
 
 def _build(model):
     spec = MODELS[model]
-    if model == "rnx26":
-        print("WARNING: rnx26 (528X/628X) support is experimental and UNTESTED on "
-              "real hardware -- see docs/porting.md", file=sys.stderr)
-    gpio = spec["backend"]()
+    if model != "rn426":
+        pins = spec["pins"] or {}
+        note = " (display-only, no known button interrupt line)" if pins.get("BTN_INT") is None else ""
+        print("WARNING: %s support is experimental and UNTESTED on real hardware%s "
+              "-- see docs/porting.md" % (model, note), file=sys.stderr)
+    gpio = spec["backend"](spec)
     lcd = LCD(gpio, spec["geometry"], spec["init_seq"])
     return gpio, lcd
+
+def _rotate_seconds():
+    """RN_ROTATE (seconds): on a no-buttons model, how often run() advances
+    to the next page on its own. Default 10; 0 disables rotation entirely.
+    Factored out so it's testable without poking os.environ inside run()."""
+    return int(os.environ.get("RN_ROTATE", "10"))
 
 # --------------------------------------------------------------------------
 def run(model):
     sleep_after = int(os.environ.get("RN_SLEEP", "90"))
+    rotate_after = _rotate_seconds()
     gpio, lcd = _build(model)
     lcd.init()
-    btn = Buttons()
+    # Some models (e.g. rn316) have no known MCU interrupt line -- skip
+    # Buttons entirely rather than opening an i2c device for a button
+    # protocol we haven't confirmed even exists on that front board.
+    btn = Buttons() if gpio.has_buttons else None
     idx = 0; last_show = 0.0; activity = time.time(); asleep = False
-    armed = True; high_since = time.time()
+    armed = True; high_since = time.time(); last_rotate = time.time()
     while True:
         now = time.time()
-        # Watch the MCU interrupt pad via the Gpio backend -- a cheap read that
-        # does NOT touch i2c. We read the MCU (reg 0x04) ONLY when this pad
-        # signals a press, i.e. only when the MCU is awake. We never poll a
-        # sleeping MCU, so its button reporting is never corrupted (the old
-        # i2c-poll loop did that).
-        if gpio.int_active():
-            high_since = None
-            if armed:                       # one event per physical press
-                armed = False
-                try:
-                    v = btn._read(Buttons.REG)
-                except OSError:
-                    v = 0
-                if v:
-                    activity = now
-                    if asleep:
-                        lcd.wake(); asleep = False; last_show = 0
-                    else:
-                        if v & Buttons.UP:     idx = (idx - 1) % len(PAGES); last_show = 0
-                        if v & Buttons.DOWN:   idx = (idx + 1) % len(PAGES); last_show = 0
-                        if v & Buttons.CENTER: last_show = 0
-        else:
-            # pad idle (high). Re-arm once it has been stable-high briefly, to
-            # debounce the MCU's pulse-train (one physical press -> one event).
-            if high_since is None:
-                high_since = now
-            elif now - high_since >= 0.05:
-                armed = True
+        if btn is not None:
+            # Watch the MCU interrupt pad via the Gpio backend -- a cheap read
+            # that does NOT touch i2c. We read the MCU (reg 0x04) ONLY when
+            # this pad signals a press, i.e. only when the MCU is awake. We
+            # never poll a sleeping MCU, so its button reporting is never
+            # corrupted (the old i2c-poll loop did that).
+            if gpio.int_active():
+                high_since = None
+                if armed:                       # one event per physical press
+                    armed = False
+                    try:
+                        v = btn._read(Buttons.REG)
+                    except OSError:
+                        v = 0
+                    if v:
+                        activity = now
+                        if asleep:
+                            lcd.wake(); asleep = False; last_show = 0
+                        else:
+                            if v & Buttons.UP:     idx = (idx - 1) % len(PAGES); last_show = 0
+                            if v & Buttons.DOWN:   idx = (idx + 1) % len(PAGES); last_show = 0
+                            if v & Buttons.CENTER: last_show = 0
+            else:
+                # pad idle (high). Re-arm once it has been stable-high briefly,
+                # to debounce the MCU's pulse-train (one physical press -> one event).
+                if high_since is None:
+                    high_since = now
+                elif now - high_since >= 0.05:
+                    armed = True
+        elif rotate_after > 0 and now - last_rotate >= rotate_after:
+            # No buttons on this model (btn is None): auto-advance pages
+            # instead of sitting on page 0 forever.
+            idx = (idx + 1) % len(PAGES); last_show = 0; last_rotate = now
         if not asleep:
             if sleep_after > 0 and now - activity > sleep_after:
                 lcd.sleep(); asleep = True

@@ -27,25 +27,54 @@ the whole thing, plus the DSDT this tool tells you to attach, into the
 GitHub issue tracking the 52x/62x port.
 
 Env:
-    ICH_DUMP_OUT  -- output file path (default /tmp/ich-gpio-dump-<host>.txt)
-    ICH_DUMP_SECS -- seconds to sample GP_LVL for the activity trace (default 60)
+    ICH_DUMP_OUT   -- output file path (default /tmp/ich-gpio-dump-<host>.txt)
+    ICH_DUMP_SECS  -- seconds to sample GP_LVL for the activity trace (default 60)
+    ICH_DUMP_MODEL -- which pin map to use: "rnx26" (default) or "rn316"
 """
 import os, sys, socket, struct, time
 
 LPC_DEV = "/sys/bus/pci/devices/0000:00:1f.0"
 EXPECT_VENDOR = 0x8086
-EXPECT_DEVICE = 0x8c54  # C224 "Lynx Point" LPC bridge
+# 0x8c54 = C224 "Lynx Point" LPC bridge (528X/628X expectation).
+# 0x3a18 = ICH10 LPC bridge (RN316 expectation).
+EXPECT_DEVICES = {0x8c54, 0x3a18}
 
-# gpio_ich line -> (bank, bit). bank n covers lines [n*32, n*32+31].
-LINES_OF_INTEREST = [
-    (54, "MOSI"),
-    (1,  "CLK"),
-    (32, "DC"),
-    (50, "CS"),
-    (6,  "EN"),
-    (7,  "RESET"),
-    (2,  "BTN_INT"),
-]
+# gpio_ich line -> name, per model. bank n covers lines [n*32, n*32+31].
+# Select with env ICH_DUMP_MODEL (default "rnx26"); e.g.
+#   ICH_DUMP_MODEL=rn316 sudo python3 tools/ich-gpio-dump.py
+MODEL_LINES = {
+    "rnx26": [
+        (54, "MOSI"),
+        (1,  "CLK"),
+        (32, "DC"),
+        (50, "CS"),
+        (6,  "EN"),
+        (7,  "RESET"),
+        (2,  "BTN_INT"),
+    ],
+    "rn316": [
+        # no BTN_INT here: buttons are a separate unknown on this generation
+        # (no MSP430 found at 0x1c in the i2c probe) -- nothing to watch yet.
+        (21, "MOSI"),
+        (19, "CLK"),
+        (16, "DC"),
+        (7,  "CS"),
+        (32, "EN"),
+        (24, "RESET"),
+    ],
+}
+# gpio_ich line count per model (mirrors MODELS[...]["ngpio"] in
+# rn426_panel.py). Bank 2 covers lines 64-95; a chipset with ngpio<=64
+# simply doesn't have it, so this tool skips it rather than dumping
+# whatever unrelated I/O port happens to sit at GPIOBASE+0x48.
+MODEL_NGPIO = {"rnx26": 76, "rn316": 61}
+
+DUMP_MODEL = os.environ.get("ICH_DUMP_MODEL", "rnx26")
+if DUMP_MODEL not in MODEL_LINES:
+    sys.exit("ICH_DUMP_MODEL=%s is not a known map (%s)" % (DUMP_MODEL, ", ".join(sorted(MODEL_LINES))))
+LINES_OF_INTEREST = MODEL_LINES[DUMP_MODEL]
+NGPIO = MODEL_NGPIO[DUMP_MODEL]
+HAS_BANK2 = NGPIO > 64
 OLED_LINES = {"MOSI", "CLK", "DC", "CS", "EN", "RESET"}  # expected outputs
 INPUT_LINES = {"BTN_INT"}                                # expected inputs
 
@@ -57,6 +86,25 @@ REG_LVL     = [0x0C, 0x38, 0x48]
 REG_GPO_BLINK   = 0x18
 REG_GP_SER_BLINK = 0x1C
 REG_GPI_INV     = 0x2C
+# LPC Configuration (GC) register: bit 4 is GPIO_EN.
+REG_GC = 0x4C
+
+
+def watch_bytes(lines_of_interest):
+    """(bank, byte_in_bank) pairs the driver's choke point would
+    read-modify-write for this model's OUTPUT lines only (known inputs like
+    BTN_INT excluded) -- same math as rn426_panel.py's _ich_line_addr: byte
+    offset within a bank is (line % 32) // 8."""
+    out = set()
+    for line, name in lines_of_interest:
+        if name in INPUT_LINES:
+            continue
+        bank, bit = line // 32, line % 32
+        out.add((bank, bit // 8))
+    return out
+
+
+WATCH_BYTES = watch_bytes(LINES_OF_INTEREST)
 
 OUT_LINES = []  # buffered output, tee'd to stdout + file at the end
 
@@ -137,6 +185,7 @@ def main():
     hr()
     out("ich-gpio-dump.py report -- paste this whole thing into the GitHub issue")
     out("Generated on: %s" % (socket.gethostname() or "unknown"))
+    out("Pin map in use: %s (set ICH_DUMP_MODEL=rnx26 or ICH_DUMP_MODEL=rn316 to switch)" % DUMP_MODEL)
     hr()
 
     if os.name != "posix" or not os.path.isdir("/sys"):
@@ -158,12 +207,16 @@ def main():
     except OSError as e:
         die("could not read vendor/device from %s: %s" % (LPC_DEV, e))
     out("vendor:device = 0x%04x:0x%04x" % (vendor, device))
-    if vendor != EXPECT_VENDOR or device != EXPECT_DEVICE:
-        out("NOTE: expected 0x%04x:0x%04x (C224 'Lynx Point'). This board's LPC "
-            "bridge is different -- this dump may not apply to it. Continuing "
-            "anyway so you can still capture what's here." % (EXPECT_VENDOR, EXPECT_DEVICE))
+    if vendor != EXPECT_VENDOR or device not in EXPECT_DEVICES:
+        out("NOTE: expected vendor 0x%04x, device one of {%s} (0x8c54 = C224 "
+            "'Lynx Point'/52x-62x, 0x3a18 = ICH10/RN316). This board's LPC "
+            "bridge is unknown-but-continuing -- this dump may not apply to "
+            "it, but capturing it can't hurt." % (
+                EXPECT_VENDOR, ", ".join("0x%04x" % d for d in sorted(EXPECT_DEVICES))))
+    elif device == 0x8c54:
+        out("matches expected C224 'Lynx Point' LPC bridge (52x/62x).")
     else:
-        out("matches expected C224 'Lynx Point' LPC bridge.")
+        out("matches expected ICH10 LPC bridge (RN316).")
 
     # --- 2. GPIOBASE --------------------------------------------------------
     section("2. GPIOBASE (PCI config offset 0x48, sysfs read only)")
@@ -178,6 +231,14 @@ def main():
         die("GPIOBASE is 0 -- firmware hasn't programmed a GPIO I/O base on "
             "this board, so there is nothing to dump. No writes have been "
             "made by this tool.")
+
+    try:
+        gc_dword = read_config_dword(REG_GC & ~3)
+        gc = (gc_dword >> ((REG_GC & 3) * 8)) & 0xFF
+        out("GC (LPC cfg 0x%02x) = 0x%02x -- GPIO_EN (bit 4) is %s"
+            % (REG_GC, gc, "SET (decode enabled)" if gc & 0x10 else "CLEAR (GPIO decode DISABLED)"))
+    except OSError as e:
+        out("NOTE: could not read GC register at 0x%02x: %s" % (REG_GC, e))
 
     # --- 3. Register dump via /dev/port reads -------------------------------
     section("3. Register dump (/dev/port reads only, byte-at-a-time)")
@@ -199,6 +260,9 @@ def main():
             regs[(bank, name)] = None
 
     for bank in (0, 1, 2):
+        if bank == 2 and not HAS_BANK2:
+            out("bank 2: not present on this chipset (ngpio=%d)" % NGPIO)
+            continue
         safe_read(bank, REG_USE_SEL[bank], "GPIO_USE_SEL")
         safe_read(bank, REG_IO_SEL[bank], "GP_IO_SEL")
         safe_read(bank, REG_LVL[bank], "GP_LVL")
@@ -241,14 +305,27 @@ def main():
             all_match = False
 
     section("Verdict")
-    out("Expected picture: USE_SEL=1 (GPIO, not native) on all seven lines; "
-        "MOSI/CLK/DC/CS/EN/RESET as outputs (IO_SEL=0); BTN_INT as an input (IO_SEL=1).")
+    has_input_line = any(name in INPUT_LINES for _line, name in LINES_OF_INTEREST)
+    out("Expected picture: USE_SEL=1 (GPIO, not native) on all %d lines below; "
+        "MOSI/CLK/DC/CS/EN/RESET as outputs (IO_SEL=0)%s."
+        % (len(LINES_OF_INTEREST),
+           "; BTN_INT as an input (IO_SEL=1)" if has_input_line else " (no known input line on this model)"))
     if all_match:
         out("MATCH: the register picture matches expectations for this pin map.")
     else:
         out("MISMATCH: the register picture does NOT match expectations. "
             "The pin map above may be wrong for this board -- do not proceed "
             "to any write-capable stage until this is sorted out.")
+    if DUMP_MODEL == "rn316":
+        out("")
+        out("RN316 note: no button line is confirmed on this generation. If "
+            "lines 7 (CS) or 16 (DC) flicker in step with disk I/O in the "
+            "activity trace below, the extracted pin row is probably wrong "
+            "-- those two are disk-activity LEDs on the Ultra4/RN314 "
+            "lineage, not panel SPI lines. Whatever DOES move on a physical "
+            "button press is the button-line candidate; by analogy with the "
+            "RN426/rnx26 front boards, expect it somewhere around lines "
+            "4/5, active-low (idle high, pulled low on press).")
 
     # --- 5. Time-series sample of GP_LVL -------------------------------------
     secs = float(os.environ.get("ICH_DUMP_SECS", "60"))
@@ -257,9 +334,10 @@ def main():
     changed = [set(), set(), set()]  # changed bit positions per bank
     last = [None, None, None]
     n_samples = 0
+    banks_to_sample = (0, 1, 2) if HAS_BANK2 else (0, 1)
     t_end = time.time() + secs
     while time.time() < t_end:
-        for bank in (0, 1, 2):
+        for bank in banks_to_sample:
             addr = gpiobase + REG_LVL[bank]
             try:
                 val = port.read_dword(addr)
@@ -279,6 +357,9 @@ def main():
     out("samples taken: %d" % n_samples)
     any_activity = False
     for bank in (0, 1, 2):
+        if bank == 2 and not HAS_BANK2:
+            out("bank 2: not present on this chipset (ngpio=%d)" % NGPIO)
+            continue
         if changed[bank]:
             any_activity = True
             lines = sorted(bank * 32 + b for b in changed[bank])
@@ -286,19 +367,21 @@ def main():
         else:
             out("bank %d: QUIET (no bit changed)" % bank)
 
-    watch_bits = {
-        0: set(range(0, 8)),
-        1: set(range(0, 8)) | set(range(16, 24)),
-    }
+    # WATCH_BYTES are (bank, byte_in_bank) pairs derived from this model's
+    # own output pin lines (see watch_bytes() above) -- the actual GP_LVL
+    # bytes rn426_panel.py's choke point would read-modify-write for THIS
+    # pin map, not a hardcoded guess.
     flagged = []
-    for bank, bits in watch_bits.items():
+    for bank, byte_in_bank in sorted(WATCH_BYTES):
+        bits = set(range(byte_in_bank * 8, byte_in_bank * 8 + 8))
         hit = changed[bank] & bits
         if hit:
-            flagged.append("bank %d bits %s" % (bank, sorted(hit)))
+            flagged.append("bank %d bits %s (byte GPIOBASE+0x%02x)"
+                            % (bank, sorted(hit), REG_LVL[bank] + byte_in_bank))
     if flagged:
         out("FLAG: activity on bytes a future driver would read-modify-write: "
             + "; ".join(flagged))
-        out("(if you pressed a button during this trace, line 2 changing is expected)")
+        out("(if you pressed a button during this trace, a BTN_INT line changing is expected)")
     else:
         out("No activity flagged on the bytes a future driver would read-modify-write.")
 
