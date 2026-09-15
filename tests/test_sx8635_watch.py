@@ -139,5 +139,78 @@ class TestDecodeCompOpMode(unittest.TestCase):
         self.assertEqual(m.decode_compopmode(0x05), {"mode": "Doze", "comp": True})
 
 
+class TestBitmapUnionBits(unittest.TestCase):
+    def test_empty(self):
+        self.assertEqual(m.bitmap_union_bits([]), set())
+
+    def test_single_value(self):
+        self.assertEqual(m.bitmap_union_bits([0x05]), {0, 2})
+
+    def test_union_across_values(self):
+        # 0x01 -> bit0, 0x08 -> bit3, 0x00 contributes nothing
+        self.assertEqual(m.bitmap_union_bits([0x01, 0x08, 0x00]), {0, 3})
+
+    def test_all_bits(self):
+        self.assertEqual(m.bitmap_union_bits([0xFF]), set(range(8)))
+
+
+class TestComputeBitsUniqueToPhase(unittest.TestCase):
+    def test_pad_bit_not_in_baseline(self):
+        # bit0 is noise present everywhere (IDLE and OK); UP's extra bit3
+        # is unique to UP; RIGHT shares bit3 with UP so it's NOT unique.
+        phase_bitmaps = {
+            "IDLE1": [0x00, 0x01],
+            "OK": [0x01, 0x03],
+            "UP": [0x01, 0x09],      # bit0 (noise) + bit3 (new)
+            "RIGHT": [0x01, 0x09],   # same bit3 as UP -- not unique to either
+        }
+        result = m.compute_bits_unique_to_phase(
+            phase_bitmaps, ["IDLE1", "OK"], ["UP", "RIGHT"])
+        self.assertEqual(result, {"UP": [3], "RIGHT": [3]})
+
+    def test_bit_unique_to_single_phase(self):
+        phase_bitmaps = {
+            "IDLE1": [0x00],
+            "OK": [0x01],
+            "UP": [0x01, 0x05],      # bit2 new
+            "DOWN": [0x01],          # nothing new
+        }
+        result = m.compute_bits_unique_to_phase(
+            phase_bitmaps, ["IDLE1", "OK"], ["UP", "DOWN"])
+        self.assertEqual(result, {"UP": [2], "DOWN": []})
+
+    def test_missing_phase_treated_as_empty(self):
+        result = m.compute_bits_unique_to_phase({}, ["IDLE1"], ["UP"])
+        self.assertEqual(result, {"UP": []})
+
+
+class TestDetectWheelDirection(unittest.TestCase):
+    def test_no_movement_single_value(self):
+        self.assertEqual(m.detect_wheel_direction([0x10, 0x10, 0x10]), "none")
+
+    def test_empty(self):
+        self.assertEqual(m.detect_wheel_direction([]), "none")
+
+    def test_plain_increasing(self):
+        self.assertEqual(m.detect_wheel_direction([0x00, 0x02, 0x05, 0x09]), "increasing")
+
+    def test_plain_decreasing(self):
+        self.assertEqual(m.detect_wheel_direction([0x09, 0x05, 0x02, 0x00]), "decreasing")
+
+    def test_decreasing_through_a_wrap(self):
+        # 0x1e,0x1b,...,0x02,0x00,0x1e -- counting down, wraps 0x00 -> 0x1e
+        positions = [0x1e, 0x1b, 0x18, 0x02, 0x00, 0x1e]
+        self.assertEqual(m.detect_wheel_direction(positions), "decreasing")
+
+    def test_increasing_through_a_wrap(self):
+        # 0x1a,0x1d,0x1e,0x00,0x02 -- counting up, wraps 0x1e -> 0x00
+        positions = [0x1a, 0x1d, 0x1e, 0x00, 0x02]
+        self.assertEqual(m.detect_wheel_direction(positions), "increasing")
+
+    def test_ambiguous_equal_and_opposite(self):
+        # one step up, one step down of equal magnitude, no wrap involved
+        self.assertEqual(m.detect_wheel_direction([0x05, 0x08, 0x05]), "ambiguous")
+
+
 if __name__ == "__main__":
     unittest.main()

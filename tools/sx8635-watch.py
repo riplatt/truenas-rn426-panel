@@ -9,6 +9,16 @@ implements, and .claude/advice/sx8635-re-report.md for the register facts
 disassembly plus the SX8636 datasheet; that doc is authoritative over any
 paraphrase in comments here).
 
+Two modes:
+  * default: IDLE / OK / OTHER / CW / CCW phases, for a quick "does anything
+    respond at all" pass.
+  * --map (or SX_WATCH_MAP=1): IDLE / OK / UP / RIGHT / DOWN / LEFT / CW /
+    CCW / IDLE, each active phase touching exactly one pad (or one wheel
+    direction) so the reg 0x02 button bitmap and reg 0x01 CapStatMsb bits
+    seen in that phase can be attributed to it. Ends with a table of bits
+    unique to each phase (i.e. not also seen during the IDLE background)
+    and the wheel position range/direction seen in each wheel phase.
+
 *** WHY THIS TOOL NEVER WRITES THE CHIP, EVER ***
 The SX8635 has an NVM (permanent, burns up to 3 times) shadowed by a
 volatile SPM (working RAM, reloaded from NVM/QSM on every power-up). Writing
@@ -113,6 +123,70 @@ def decode_compopmode(v):
     datasheet footnote, so they are ignored here rather than decoded."""
     mode = {0: "Active", 1: "Doze", 2: "Sleep"}.get(v & 0x03, "Reserved(%d)" % (v & 0x03))
     return {"mode": mode, "comp": bool(v & 0x04)}
+
+
+def bitmap_union_bits(values):
+    """values: iterable of raw register byte ints. Returns the set of bit
+    numbers (0-7) set in ANY of them -- used to build the per-phase "bits
+    seen" summary and the cross-phase uniqueness table below. Pure, no I/O."""
+    bits = set()
+    for v in values:
+        n = 0
+        vv = v
+        while vv:
+            if vv & 1:
+                bits.add(n)
+            vv >>= 1
+            n += 1
+    return bits
+
+
+def compute_bits_unique_to_phase(phase_bitmaps, baseline_names, phase_names):
+    """phase_bitmaps: {phase_name: iterable of raw reg 0x02 values seen in
+    that phase}. baseline_names: phases whose bits define background noise
+    (e.g. IDLE + OK -- a bit that's set almost everywhere isn't useful for
+    telling pads apart). phase_names: which phases to compute a result for.
+    Returns {phase_name: sorted list of bit numbers seen in that phase but
+    in NONE of the baseline phases}. Pure, no I/O."""
+    baseline_bits = set()
+    for name in baseline_names:
+        baseline_bits |= bitmap_union_bits(phase_bitmaps.get(name, ()))
+    result = {}
+    for name in phase_names:
+        phase_bits = bitmap_union_bits(phase_bitmaps.get(name, ()))
+        result[name] = sorted(phase_bits - baseline_bits)
+    return result
+
+
+def detect_wheel_direction(positions):
+    """positions: list of raw slider/wheel position ints, in time order.
+    Wrap-aware: a step whose magnitude is more than half the range observed
+    across the whole sequence is treated as a wrap around that range (e.g.
+    counting down through 0 back up near the top, or counting up through
+    the top back down to 0) rather than as one huge step in the naive
+    direction. Returns "increasing", "decreasing", "none" (fewer than two
+    distinct values seen), or "ambiguous" (moved both ways by equal amounts).
+    Pure, no I/O."""
+    distinct = set(positions)
+    if len(distinct) < 2:
+        return "none"
+    lo, hi = min(distinct), max(distinct)
+    rng = hi - lo
+    half = rng / 2.0
+    modulus = rng + 1
+    net = 0
+    for a, b in zip(positions, positions[1:]):
+        d = b - a
+        if d == 0:
+            continue
+        if rng > 0 and abs(d) > half:
+            d = d - modulus if d > 0 else d + modulus
+        net += 1 if d > 0 else -1
+    if net > 0:
+        return "increasing"
+    if net < 0:
+        return "decreasing"
+    return "ambiguous"
 
 
 def compute_verdict(summary):
@@ -287,10 +361,44 @@ PHASES = [
     {"name": "IDLE2", "prompt": "IDLE -- hands off the panel entirely", "secs": IDLE_SECS},
 ]
 
+# --map / SX_WATCH_MAP=1: one active phase per pad (plus each wheel
+# direction) instead of a single "OTHER" catch-all, so reg 0x02/0x01 bits
+# seen in a phase can be attributed to a specific pad. Idle phases are
+# fixed at 5s here (shorter total runtime; still enough for the 1s
+# heartbeat to fire a few times) -- active phases share ACTIVE_SECS above.
+MAP_IDLE_SECS = 5
+
+MAP_PHASES = [
+    {"name": "IDLE1", "prompt": "IDLE -- hands off the panel entirely", "secs": MAP_IDLE_SECS},
+    {"name": "OK",    "prompt": "Touch and release the centre OK button, twice", "secs": ACTIVE_SECS},
+    {"name": "UP",    "prompt": "Touch and release the TOP arrow pad, twice -- do not slide", "secs": ACTIVE_SECS},
+    {"name": "RIGHT", "prompt": "Touch and release the RIGHT arrow pad, twice -- do not slide", "secs": ACTIVE_SECS},
+    {"name": "DOWN",  "prompt": "Touch and release the BOTTOM arrow pad, twice -- do not slide", "secs": ACTIVE_SECS},
+    {"name": "LEFT",  "prompt": "Touch and release the LEFT arrow pad, twice -- do not slide", "secs": ACTIVE_SECS},
+    {"name": "CW",    "prompt": "Slide the wheel CLOCKWISE one full turn, starting at the top", "secs": ACTIVE_SECS},
+    {"name": "CCW",   "prompt": "Slide the wheel COUNTER-CLOCKWISE one full turn, starting at the top", "secs": ACTIVE_SECS},
+    {"name": "IDLE2", "prompt": "IDLE -- hands off the panel entirely", "secs": MAP_IDLE_SECS},
+]
+
+# Baseline is the idle phases only. OK is a pad like any other: a stray
+# brush of an arrow while reaching for OK would otherwise subtract that
+# arrow's bit out of its own row.
+MAP_BASELINE_PHASE_NAMES = ["IDLE1", "IDLE2"]
+MAP_PAD_PHASE_NAMES = ["OK", "UP", "RIGHT", "DOWN", "LEFT"]
+MAP_WHEEL_PHASE_NAMES = ["CW", "CCW"]
+
+# Phase names that count as "a button/pad phase" or "a wheel phase" for the
+# button_bits_seen / wheel_activity_seen verdict evidence -- shared across
+# both PHASES and MAP_PHASES so compute_verdict's inputs stay meaningful in
+# either mode.
+BUTTON_PHASE_NAMES = frozenset(["OK", "OTHER", "UP", "RIGHT", "DOWN", "LEFT"])
+WHEEL_PHASE_NAMES = frozenset(["CW", "CCW"])
+
 
 def new_phase_summary():
     return {
         "irq_counts": {name: 0 for _bit, name in IRQ_BITS},
+        "reg01_bitmaps": set(),
         "reg02_bitmaps": set(),
         "pos_values": [],
         "nirq_low_samples": 0,
@@ -357,23 +465,24 @@ def run_phase(i2c_fd, port_fd, nirq_port, nirq_bit, phase, state, overall):
                     if irq & (1 << bit):
                         psum["irq_counts"][bname] += 1
 
+            psum["reg01_bitmaps"].add(r1)
             psum["reg02_bitmaps"].add(r2)
             pos = (r3 << 8) | r4
             psum["pos_values"].append(pos)
             moved = state["last_pos"] is not None and pos != state["last_pos"]
             state["last_pos"] = pos
 
-            if name in ("OK", "OTHER") and (irq & 0x04) and r2 != 0:
+            if name in BUTTON_PHASE_NAMES and (irq & 0x04) and r2 != 0:
                 overall["button_bits_seen"] = True
-            if name in ("CW", "CCW") and (irq & 0x08) and (r1 & 0x10) and moved:
+            if name in WHEEL_PHASE_NAMES and (irq & 0x08) and (r1 & 0x10) and moved:
                 overall["wheel_activity_seen"] = True
 
             changed = (r1 != state["last_r1"] or r2 != state["last_r2"]
                        or r3 != state["last_r3"] or r4 != state["last_r4"])
             if irq != 0 or changed:
                 t = loop_t - state["t0"]
-                out("t=%7.3f phase=%-5s nirq=%d->%d irq=%s msb=0x%02x lsb=0x%02x pos=0x%04x"
-                    % (t, name, nirq_now, nirq_after, format_irq(irq), r3, r4, pos))
+                out("t=%7.3f phase=%-5s nirq=%d->%d irq=%s cmsb=0x%02x msb=0x%02x lsb=0x%02x pos=0x%04x"
+                    % (t, name, nirq_now, nirq_after, format_irq(irq), r1, r3, r4, pos))
 
             state["last_r1"], state["last_r2"] = r1, r2
             state["last_r3"], state["last_r4"] = r3, r4
@@ -384,7 +493,7 @@ def run_phase(i2c_fd, port_fd, nirq_port, nirq_bit, phase, state, overall):
     return psum
 
 
-def print_phase_summary(phase, psum):
+def print_phase_summary(phase, psum, map_mode=False):
     out()
     out("-- phase %s summary --" % phase["name"])
     counted = {k: v for k, v in psum["irq_counts"].items() if v}
@@ -404,6 +513,44 @@ def print_phase_summary(phase, psum):
     out("  NIRQ 0->1 immediately after an IrqSrc read: %d" % psum["clean_deassert"])
     out("  OSError count: %d" % psum["oserror_count"])
 
+    if map_mode:
+        nonzero02 = sorted(v for v in psum["reg02_bitmaps"] if v != 0)
+        out("  distinct NONZERO reg 0x02 values: %s"
+            % ([("0x%02x" % v) for v in nonzero02] if nonzero02 else "none"))
+        bits02 = sorted(bitmap_union_bits(psum["reg02_bitmaps"]))
+        out("  reg 0x02 bits seen (union, bit numbers): %s" % (bits02 if bits02 else "none"))
+        out("  distinct reg 0x01 values: %s"
+            % (sorted("0x%02x" % v for v in psum["reg01_bitmaps"]) if psum["reg01_bitmaps"] else "none"))
+        out("  wheel pos direction: %s" % detect_wheel_direction(pos))
+
+
+def print_map_summary(phase_summaries):
+    """map-mode-only final report section: which reg 0x02 bits are unique
+    to each pad/wheel phase (i.e. absent from the IDLE background),
+    and the wheel position range/direction seen in each wheel phase. Table
+    construction itself (compute_bits_unique_to_phase, detect_wheel_direction)
+    is pure and unit-tested; this function just formats and prints."""
+    out("\n=== Pad mapping table ===")
+    out("(bits seen during a pad/wheel phase that were NOT also seen during")
+    out(" IDLE -- a bit unique to one row is very likely that pad.)")
+    phase_bitmaps = {name: psum["reg02_bitmaps"] for name, psum in phase_summaries.items()}
+    unique = compute_bits_unique_to_phase(
+        phase_bitmaps, MAP_BASELINE_PHASE_NAMES, MAP_PAD_PHASE_NAMES + MAP_WHEEL_PHASE_NAMES)
+    for name in MAP_PAD_PHASE_NAMES + MAP_WHEEL_PHASE_NAMES:
+        bits = unique.get(name, [])
+        out("  %-6s -> bits %s" % (name, bits if bits else "none"))
+
+    cw_pos = phase_summaries.get("CW", {}).get("pos_values", [])
+    ccw_pos = phase_summaries.get("CCW", {}).get("pos_values", [])
+    combined = cw_pos + ccw_pos
+    out("\nWheel position across both wheel phases:")
+    if combined:
+        out("  range: min=0x%04x max=0x%04x" % (min(combined), max(combined)))
+    else:
+        out("  range: no reads in either wheel phase")
+    out("  CW  phase direction: %s" % detect_wheel_direction(cw_pos))
+    out("  CCW phase direction: %s" % detect_wheel_direction(ccw_pos))
+
 
 # --------------------------------------------------------------------------
 def main():
@@ -412,6 +559,7 @@ def main():
         return 1
 
     force = "--force" in sys.argv[1:]
+    map_mode = "--map" in sys.argv[1:] or os.environ.get("SX_WATCH_MAP") == "1"
     check_preconditions(force)
 
     out("sx8635-watch.py -- read-only SX8635 diagnostic")
@@ -453,28 +601,38 @@ def main():
     except OSError as e:
         die("chip read failed during startup: %s -- see the 'chip absent' verdict row" % e)
 
-    out("\n=== Phased interactive trace, ~60s total ===")
+    phases = MAP_PHASES if map_mode else PHASES
+    total_secs = sum(p["secs"] for p in phases)
+    out("\n=== Phased interactive trace%s, ~%ds total ==="
+        % (" (mapping mode)" if map_mode else "", total_secs))
     state = {
         "last_read_t": 0.0, "sub_loop": False, "oserror_count": 0,
         "last_r1": None, "last_r2": None, "last_r3": None, "last_r4": None,
         "last_pos": None, "t0": time.perf_counter(),
     }
-    for phase in PHASES:
+    phase_summaries = {}
+    for phase in phases:
         countdown(phase["prompt"])
         out("\n>>> phase %s (%ds): %s" % (phase["name"], phase["secs"], phase["prompt"]))
         psum = run_phase(i2c_fd, port_fd, nirq_port, nirq_bit, phase, state, overall)
-        print_phase_summary(phase, psum)
+        print_phase_summary(phase, psum, map_mode=map_mode)
+        phase_summaries[phase["name"]] = psum
 
     out("\n=== Overall ===")
     out("attempted reads: %d   OSError count: %d" % (overall["attempted_reads"], overall["oserror_count"]))
     verdict = compute_verdict(overall)
     out("VERDICT: %s" % verdict)
 
+    if map_mode:
+        print_map_summary(phase_summaries)
+
     out_path = write_report()
     print()
-    print("Please paste the contents of %s (or attach it) into the issue," % out_path)
-    print("and say which physical pad you touched during the OK and OTHER phases --")
-    print("this tool only knows which phase was running, not which pad is which.")
+    print("Please paste the contents of %s (or attach it) into the issue." % out_path)
+    if not map_mode:
+        print("Say which physical pad you touched during the OK and OTHER phases --")
+        print("this tool only knows which phase was running, not which pad is which.")
+        print("(Re-run with --map to have it ask for each pad separately instead.)")
     return 0
 
 
