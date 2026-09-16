@@ -64,7 +64,7 @@ MODEL_LINES = {
     ],
 }
 # gpio_ich line count per model (mirrors MODELS[...]["ngpio"] in
-# rn426_panel.py). Bank 2 covers lines 64-95; a chipset with ngpio<=64
+# rnpanel/models.py). Bank 2 covers lines 64-95; a chipset with ngpio<=64
 # simply doesn't have it, so this tool skips it rather than dumping
 # whatever unrelated I/O port happens to sit at GPIOBASE+0x48.
 MODEL_NGPIO = {"rnx26": 76, "rn316": 61}
@@ -93,7 +93,7 @@ REG_GC = 0x4C
 def watch_bytes(lines_of_interest):
     """(bank, byte_in_bank) pairs the driver's choke point would
     read-modify-write for this model's OUTPUT lines only (known inputs like
-    BTN_INT excluded) -- same math as rn426_panel.py's _ich_line_addr: byte
+    BTN_INT excluded) -- same math as rnpanel/gpio.py's _ich_line_addr: byte
     offset within a bank is (line % 32) // 8."""
     out = set()
     for line, name in lines_of_interest:
@@ -369,7 +369,7 @@ def main():
 
     # WATCH_BYTES are (bank, byte_in_bank) pairs derived from this model's
     # own output pin lines (see watch_bytes() above) -- the actual GP_LVL
-    # bytes rn426_panel.py's choke point would read-modify-write for THIS
+    # bytes rnpanel/gpio.py's choke point would read-modify-write for THIS
     # pin map, not a hardcoded guess.
     flagged = []
     for bank, byte_in_bank in sorted(WATCH_BYTES):

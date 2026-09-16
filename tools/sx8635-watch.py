@@ -39,27 +39,27 @@ to make by accident.
 """
 import os
 import sys
-import glob
 import time
-import struct
 import ctypes
 import socket
 import subprocess
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-# rn426_panel guards its own fcntl import for Windows importability (see its
-# header); importing it here does NOT require Pillow or fcntl at import
-# time, only when its hardware classes are actually constructed. We only
-# ever use the three pure/stdlib helpers below plus module-level constants.
-from rn426_panel import find_i801_bus, _parse_gpiobase, _ich_line_addr, I2C_SLAVE, I2C_SMBUS, _smbus_ioctl
+# rnpanel.i2c/rnpanel.gpio guard their own fcntl import for Windows
+# importability (see rnpanel/i2c.py's header); importing them here does NOT
+# require Pillow or fcntl at import time, only when their hardware classes
+# are actually constructed. We only ever use the pure/stdlib helpers below
+# plus module-level constants, both leaf modules of the rnpanel package.
+from rnpanel.i2c import find_i801_bus, I2C_SLAVE, I2C_SMBUS, _smbus_ioctl
+from rnpanel.gpio import _parse_gpiobase, _ich_line_addr
 
 try:
-    import fcntl                        # POSIX only, see rn426_panel.py's own guard
+    import fcntl                        # POSIX only, see rnpanel/i2c.py's own guard
 except ImportError:
     fcntl = None                        # lets this module import (e.g. for tests) on Windows
 
 # Self-check: this file must never contain a call to the positional-write
-# syscall (the "write to this exact byte offset" primitive rn426_panel.py's
+# syscall (the "write to this exact byte offset" primitive rnpanel/gpio.py's
 # IchPortGpio._wr_byte uses on /dev/port, and DnvMmioGpio would need on
 # /dev/mem). Built from two pieces so this very line doesn't itself contain
 # the forbidden word as contiguous text.
@@ -94,7 +94,7 @@ IRQ_BITS = [
     (0, "opmode"),
 ]
 
-I2C_SMBUS_READ = 1          # rw sense: read (rn426_panel.Buttons._read uses the same value)
+I2C_SMBUS_READ = 1          # rw sense: read (rnpanel.msp430.Buttons._read uses the same value)
 I2C_SMBUS_BYTE_DATA = 2     # transfer size code for a single-byte register read
 
 

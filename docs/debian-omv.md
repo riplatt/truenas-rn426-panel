@@ -17,7 +17,7 @@ unit already shipped in [`systemd/rn426-panel.service`](../systemd/rn426-panel.s
 ```bash
 sudo apt install python3-pil fonts-dejavu-core
 sudo mkdir -p /opt/rn426-panel
-sudo cp rn426_panel.py /opt/rn426-panel/
+sudo cp -r rn426_panel.py rnpanel /opt/rn426-panel/
 sudo cp systemd/rn426-panel.service /etc/systemd/system/
 # edit ExecStart if you put it somewhere other than /opt/rn426-panel
 sudo systemctl enable --now rn426-panel

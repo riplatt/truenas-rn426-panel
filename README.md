@@ -94,9 +94,10 @@ cd truenas-rn426-panel
 sudo ./install.sh /mnt/<your-pool>/rn426-panel
 ```
 
-`install.sh` copies the driver to the given directory, loads the i2c modules,
-registers a **POSTINIT** init script in the TrueNAS config DB, and starts the
-service. See the script for the exact, reversible steps.
+`install.sh` copies the driver -- `rn426_panel.py` plus the `rnpanel/` package
+directory it needs alongside it -- to the given directory, loads the i2c
+modules, registers a **POSTINIT** init script in the TrueNAS config DB, and
+starts the service. See the script for the exact, reversible steps.
 
 To remove it: `sudo ./install.sh --uninstall /mnt/<your-pool>/rn426-panel`.
 
@@ -117,7 +118,7 @@ RN_SLEEP=120 ...               # env var: idle seconds before sleep (0 = never)
 ```
 
 Customize the pages by editing the `page_*()` functions and the `PAGES` list in
-`rn426_panel.py`.
+`rnpanel/pages.py`.
 
 ## Important gotchas / hardware warnings
 

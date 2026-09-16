@@ -8,7 +8,11 @@
 # This unit is reference-only for TrueNAS SCALE users, but is the actual, intended
 # install path for plain Debian / OpenMediaVault systems on the same hardware.
 # See docs/debian-omv.md for full install steps. Adjust the path in ExecStart
-# to wherever you placed rn426_panel.py.
+# to wherever you placed rn426_panel.py -- the rnpanel/ package directory must
+# sit right next to it there too (running a script by path puts its own
+# directory on sys.path[0], so no PYTHONPATH is needed, but python -I, -P or
+# PYTHONSAFEPATH=1 would stop rnpanel/ from being found; this unit uses none
+# of those).
 
 [Unit]
 Description=ReadyNAS RN426 front-panel driver (LCD + buttons)

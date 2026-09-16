@@ -31,13 +31,26 @@ if [ "$UNINSTALL" = 1 ]; then
   systemctl stop "$UNIT" 2>/dev/null || true
   id="$(find_id)"
   if [ -n "$id" ]; then midclt call initshutdownscript.delete "$id" >/dev/null && echo "Removed init script id $id."; fi
-  echo "Service stopped and autostart removed. Driver files left in $DEST (delete manually if you want)."
+  echo "Service stopped and autostart removed. Driver files (rn426_panel.py and rnpanel/) left in $DEST (delete manually if you want)."
   exit 0
+fi
+
+# Refuse the in-place case: DEST must be a separate directory from this
+# checkout, or the rm -rf below would delete rnpanel/ out of the checkout
+# before the copy that's supposed to repopulate DEST from it.
+resolved_dest="$(cd "$DEST" 2>/dev/null && pwd -P || true)"
+resolved_self="$(cd "$SELF_DIR" && pwd -P)"
+if [ -n "$resolved_dest" ] && [ "$resolved_dest" = "$resolved_self" ]; then
+  echo "DEST ($DEST) is this checkout itself -- point install.sh at a separate directory." >&2
+  exit 1
 fi
 
 echo "Installing to $DEST ..."
 mkdir -p "$DEST"
 install -m 0755 "$SELF_DIR/rn426_panel.py" "$DEST/rn426_panel.py"
+rm -rf "$DEST/rnpanel"
+mkdir -p "$DEST/rnpanel"
+install -m 0644 "$SELF_DIR"/rnpanel/*.py "$DEST/rnpanel/"
 cat > "$DEST/start.sh" <<SH
 #!/bin/bash
 modprobe i2c-dev 2>/dev/null
