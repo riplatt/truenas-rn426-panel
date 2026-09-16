@@ -104,7 +104,9 @@ equivalent of this table:
 MOSI / CLK / D/C / CS / EN / RESET  ->  PADCFG_DW0 physical addresses
 ```
 
-Plug those into `LCD.__init__` in `rn426_panel.py`.
+Plug those into a `Gpio` subclass's `__init__` in `rnpanel/gpio.py` (see
+`DnvMmioGpio` for the pattern), then add a row for your model to
+`rnpanel/models.py`.
 
 This only applies as-is to models on `gpio_dnv`. If your model's config
 struct names a different gpiochip (`gpio_ich`, as above, or something else
@@ -118,9 +120,11 @@ already solved.
 ## 3. Confirm the init sequence and geometry
 
 Dump your firmware's `init_oled` table. If your panel is a different size
-(e.g. 128×64), adjust the page count in `LCD.show` (`range(4)` → `range(8)`) and
-the mux/addressing bytes accordingly. Remember the table likely **omits
-display-on**, send `0xAF` after init.
+(e.g. 128×64), adjust the page count via your model's `geometry` in
+`rnpanel/models.py` (`MODELS[...]["geometry"]`, e.g. `(4, 132)` -> `(8, 132)`
+for `range(4)` -> `range(8)` in `LCD.show`) and the mux/addressing bytes
+accordingly. Remember the table likely **omits display-on**, send `0xAF`
+after init.
 
 ## 4. Buttons
 
@@ -245,5 +249,5 @@ above applies to it? Run [`tools/rn-probe.sh`](../tools/rn-probe.sh) and open
 an issue with its output, that's the fastest way to get a read on it.
 
 If you get this working on another model, please open a PR adding your pad map
-and init sequence (a new `LCD` subclass or a per-model config dict would be a
-welcome refactor).
+and init sequence: a row in `rnpanel/models.py`'s `MODELS` table, plus a new
+`Gpio` backend class in `rnpanel/gpio.py` if your chipset needs one.

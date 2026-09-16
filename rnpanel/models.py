@@ -4,7 +4,8 @@ from rnpanel.lcd import INIT_SEQ
 
 # --------------------------------------------------------------------------
 # Model table + selection. Adding a model means adding a row here plus,
-# if it needs one, a new Gpio subclass above -- nothing else changes.
+# if it needs one, a new Gpio subclass in rnpanel/gpio.py -- nothing else
+# changes.
 # --------------------------------------------------------------------------
 MODELS = {
     "rn426": {

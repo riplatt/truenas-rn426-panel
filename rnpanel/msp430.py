@@ -3,7 +3,8 @@ from rnpanel.i2c import fcntl, I2C_SLAVE, I2C_SMBUS, _smbus_ioctl, find_i801_bus
 
 class Msp430Buttons:
     """RN426/RNx26 front-board TI MSP430 over the i801 SMBus. See the
-    module-level Buttons comment above for the reg 0x02 write hazard."""
+    Buttons comment at the top of rnpanel/i2c.py for the reg 0x02
+    write hazard."""
     LEFT, RIGHT, UP, DOWN, CENTER = 0x01, 0x02, 0x04, 0x08, 0x10
     ADDR, REG = 0x1C, 0x04
 
