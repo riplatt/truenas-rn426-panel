@@ -16,14 +16,15 @@ this driver does nothing. See issue #4 and docs/porting.md.
 | Model | Display | Buttons | Status |
 |---|---|---|---|
 | RN426 / RN428 | yes | yes | working |
-| RN316 | yes | not yet | experimental, display confirmed by one tester (issue #2) |
+| RN316 | yes | yes | experimental, confirmed by one tester (issue #2) |
 | RN528X / RN628X | untested | untested | experimental, in bring-up (issue #10) |
 
 The RN316 and 528X/628X use a different GPIO controller (`gpio_ich`) and a
-separate code path. The RN316 buttons are a capacitive touch wheel on a
-different chip from the RN426's, so for now that model runs display-only
-with the pages rotating on a timer. Both experimental models print a warning
-at startup.
+separate code path. The RN316's buttons are a capacitive touch ring on a
+different chip from the RN426's (a Semtech SX8635), which the driver only ever
+reads. Turn the ring clockwise for the next page and counter-clockwise for the
+previous one; OK refreshes and DOWN also goes to the next page. Both
+experimental models print a warning at startup.
 
 When you install TrueNAS on this hardware, the little front display stays frozen
 on **`Booting...`** forever and the buttons do nothing. TrueNAS has no
