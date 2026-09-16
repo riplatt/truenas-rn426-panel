@@ -6,8 +6,9 @@
 # and registers a POSTINIT init script in the TrueNAS config DB so it starts on
 # every boot and survives updates.
 #
-# Usage:   sudo ./install.sh /mnt/<your-pool>/rn426-panel
-# Remove:  sudo ./install.sh --uninstall /mnt/<your-pool>/rn426-panel
+# Usage:   sudo bash ./install.sh /mnt/<your-pool>/rn426-panel
+# Remove:  sudo bash ./install.sh --uninstall /mnt/<your-pool>/rn426-panel
+#          (via bash: TrueNAS mounts home directories noexec)
 set -euo pipefail
 
 COMMENT="RN426 front panel driver (LCD + buttons)"

@@ -92,15 +92,21 @@ Super-I/O, not the front board.
 ```bash
 git clone https://github.com/riplatt/truenas-rn426-panel.git
 cd truenas-rn426-panel
-sudo ./install.sh /mnt/<your-pool>/rn426-panel
+sudo bash ./install.sh /mnt/<your-pool>/rn426-panel
 ```
+
+Run it through `bash` as shown. TrueNAS mounts home directories `noexec`, so
+if you cloned into your home directory, `sudo ./install.sh` fails with
+"Permission denied" even though the script is executable. Installing into a
+pool path is fine; the installer refuses if you point it at the checkout
+itself.
 
 `install.sh` copies the driver -- `rn426_panel.py` plus the `rnpanel/` package
 directory it needs alongside it -- to the given directory, loads the i2c
 modules, registers a **POSTINIT** init script in the TrueNAS config DB, and
 starts the service. See the script for the exact, reversible steps.
 
-To remove it: `sudo ./install.sh --uninstall /mnt/<your-pool>/rn426-panel`.
+To remove it: `sudo bash ./install.sh --uninstall /mnt/<your-pool>/rn426-panel`.
 
 If you're running plain Debian or OpenMediaVault instead of TrueNAS SCALE,
 don't run `install.sh`, it requires `midclt` and will refuse to run. See
