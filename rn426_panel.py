@@ -487,17 +487,41 @@ def _wheel_emit(acc, detent):
         acc -= detent
     return events, acc
 
+# reg 0x02 bit 0: set on almost any touch (pad or ring alike) -- never a
+# button by itself. Always masked out before any rising-edge check below.
+COMMON_TOUCH_BIT = 0x01
+
 def _rising_actions(bitmap, prev_bitmap, keys):
-    """Map newly-set bits in reg 0x02 (bitmap vs prev_bitmap) through
-    `keys` ({bit-mask: action}). Empty `keys` (provisional, see MODELS) ==
-    "any newly set bit = one OK", regardless of how many bits rose at
-    once."""
-    rising = bitmap & ~prev_bitmap
-    if not rising:
-        return []
+    """Map reg 0x02 (bitmap vs prev_bitmap) through `keys`, an ORDERED LIST
+    of (mask, action) pairs, and return at most one action.
+
+    COMMON_TOUCH_BIT (bit 0) is masked out of both bitmap and prev_bitmap
+    before anything else -- it sets on almost any touch (pad or ring) and
+    must never itself be treated as a button, and must never make an
+    otherwise-empty masked bitmap look "nonzero".
+
+    If `keys` is empty (the provisional/unmapped-model shape), the
+    fallback is "masked bitmap went from zero to nonzero" -> one ["OK"];
+    otherwise no action.
+
+    If `keys` is given, each (mask, action) pair is checked in order for a
+    RISING EDGE ON THE WHOLE MASK: all of the mask's bits must be present
+    in `bitmap` now and NOT all present in `prev_bitmap`. This is
+    per-whole-mask, not per-bit, so a pad whose bits bleed in one at a time
+    across reads (e.g. DOWN's 0x01 -> 0x09 -> 0x0d) fires exactly once, at
+    the read where the mask first becomes fully satisfied. The first mask
+    in list order that satisfies this wins and short-circuits the rest, so
+    at most one action is returned per call, and pad bleed that happens to
+    satisfy two masks in the same single read can't produce two actions.
+    """
+    bitmap &= ~COMMON_TOUCH_BIT
+    prev_bitmap &= ~COMMON_TOUCH_BIT
     if not keys:
-        return ["OK"]
-    return [action for mask, action in keys.items() if rising & mask]
+        return ["OK"] if (prev_bitmap == 0 and bitmap != 0) else []
+    for mask, action in keys:
+        if (bitmap & mask) == mask and (prev_bitmap & mask) != mask:
+            return [action]
+    return []
 
 class Sx8635Buttons:
     """RN316 front-board Semtech SX8635 capacitive touch-wheel controller,
@@ -518,8 +542,11 @@ class Sx8635Buttons:
     real-hardware run): reading reg 0x00 (IrqSrc) clears NIRQ; bit 2 =
     buttons (read reg 0x02, a touch bitmap); bit 3 = wheel (position =
     (reg0x03<<8)|reg0x04, reg 0x01 bit 0x10 = wheel currently touched).
-    Wheel bit->pad mapping in reg 0x02 is NOT yet known (mapping run
-    pending) -- see MODELS["rn316"]["sx8635"]["keys"].
+    The reg 0x02 bit->pad mapping is now confirmed by a real-hardware
+    mapping run: bit 0 = common "something touched" bit (never a button by
+    itself), bit 1 = OK, bits 2|3 = DOWN, bits 4|5 = RIGHT. See
+    docs/porting.md for the full table and MODELS["rn316"]["sx8635"]["keys"]
+    for the mapping this class actually uses.
     """
     REG_IRQSRC, REG_CAPSTAT_MSB, REG_CAPSTAT_LSB = 0x00, 0x01, 0x02
     REG_POS_MSB, REG_POS_LSB = 0x03, 0x04
@@ -614,29 +641,8 @@ class Sx8635Buttons:
 
     def _read_buttons(self):
         bitmap = self._read(self.REG_CAPSTAT_LSB)
-        if not self.keys:
-            # Provisional (see MODELS/class doc): treat "touch began"
-            # (bitmap was all-zero, now isn't) as one OK, not "any bit
-            # rose". The OK-phase trace shows bleed bits rising 2-3x across
-            # a single physical press (0x01 -> 0x03 -> 0x23) as the finger
-            # settles on the pad, which would otherwise fire OK that many
-            # times for one press. Once `keys` is filled in from the
-            # mapping run, the mapped path should likewise decide on
-            # "first rise from an all-zero bitmap" rather than "every
-            # rising bit" -- to be confirmed against that run's data.
-            rising = ["OK"] if (self.prev_bitmap == 0 and bitmap != 0) else []
-        else:
-            rising = _rising_actions(bitmap, self.prev_bitmap, self.keys)
+        rising = _rising_actions(bitmap, self.prev_bitmap, self.keys)
         self.prev_bitmap = bitmap
-        if not self.keys and self.wheel_touched:
-            # Provisional: the tester's data shows reg 0x02 bit 0 sets
-            # during almost any touch, including wheel touches. With an
-            # empty (unmapped) keys table we can't tell a real button from
-            # that noise, so suppress the "any bit = OK" fallback while the
-            # wheel is latched touched. Once keys are filled in from a
-            # mapping run, a real button's own mask still rises
-            # independently and this suppression no longer applies to it.
-            return []
         return rising
 
     def _read_wheel(self):
@@ -766,11 +772,23 @@ MODELS = {
             "wheel_range": 0x1f,   # observed raw position range per full turn (one outlier
                                    # at 0x3b seen at a wrap -- Sx8635Buttons ignores pos >= this)
             "detent": 4,
-            # reg 0x02 bit-mask -> action. EMPTY = provisional: a mapping run
-            # to identify which bit is which physical pad is still pending;
-            # until then, any newly-set bit in 0x02 is treated as "OK". Fill
-            # in e.g. {0x01: "OK", 0x02: "BACKUP"} once that run reports back.
-            "keys": {},
+            # reg 0x02 bit-mask -> action, confirmed by a real-hardware
+            # mapping run (see docs/porting.md for the full table). This is
+            # an ORDERED LIST of (mask, action) pairs, not a dict, checked
+            # in order -- first whole-mask match wins, so the check order is
+            # explicit and self-describing rather than relying on dict
+            # iteration order. UP and LEFT have no button bits at all on
+            # this board: they show up purely as ring positions (~0x09 for
+            # UP, ~0x1e for LEFT), so "page back" happens by turning the
+            # ring counter-clockwise, not by pressing a button.
+            "keys": [
+                (0x02, "OK"),      # bit 1: centre OK pad -> refresh
+                (0x0c, "NEXT"),    # bits 2|3: DOWN pad -> NEXT page (mirrors the RN426's DOWN->NEXT)
+                (0x30, "RIGHT"),   # bits 4|5: RIGHT pad -> activity-only, like the RN426's LEFT/RIGHT
+                                   # (run()/_apply_actions already treats an unrecognized
+                                   # action as activity-only: resets idle, wakes if asleep,
+                                   # never moves a page)
+            ],
         },
     },
 }
@@ -824,8 +842,8 @@ def _build(model):
     spec = MODELS[model]
     if model == "rn316":
         print("WARNING: rn316 display confirmed working on one real unit; "
-              "buttons are read-only (SX8635 touch-wheel, no SPM/NVM writes) "
-              "and the button-to-pad mapping is still provisional -- see "
+              "buttons are read-only (SX8635 touch-wheel, no SPM/NVM writes), "
+              "button-to-pad mapping confirmed on real hardware -- see "
               "docs/porting.md", file=sys.stderr)
     elif model != "rn426":
         pins = spec["pins"] or {}

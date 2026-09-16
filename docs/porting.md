@@ -182,6 +182,33 @@ A few things worth knowing before you touch it:
   read-only button path already works or needs more (see the design doc's
   Q6 for the decision table it implements).
 
+- **The reg 0x02 bit->pad mapping is now confirmed on real hardware.** A
+  mapping run walked each pad and the ring and recorded which bits set in
+  reg 0x02 (the touch bitmap):
+
+  | reg 0x02 bit(s) | mask | pad          |
+  |-----------------|------|--------------|
+  | bit 0           | 0x01 | common "something touched" bit -- sets on almost any touch (pad or ring alike), never a button by itself |
+  | bit 1           | 0x02 | OK (centre)  |
+  | bits 2\|3       | 0x0c | DOWN         |
+  | bits 4\|5       | 0x30 | RIGHT        |
+
+  UP and LEFT don't have button bits at all on this board. They show up
+  purely as ring positions (~0x09 for UP, ~0x1e for LEFT) with reg 0x01
+  bit 0x10 (ring touched) set, not as anything in reg 0x02. So there's no
+  way to get a "PREV"-style button press out of this chip's factory
+  config -- paging back has to be a counter-clockwise wheel turn instead
+  of a button press.
+
+  The chip also reports which way the ring is turning in reg 0x01 itself,
+  which is a handy free cross-check against the position-delta math the
+  driver already does: bit 0x10 means the ring is touched, and while it's
+  actually turning one of two more bits comes on with it, giving a
+  combined reg 0x01 value of 0x30 turning one way and 0x50 turning the
+  other. Turning clockwise is decreasing wheel position, which is already
+  what the driver assumes elsewhere -- this is just another way to see
+  the same thing on the wire.
+
 ## Prior art: legacy models already covered elsewhere
 
 Probe reports (issues #5 to #9) and forum links turned up existing projects

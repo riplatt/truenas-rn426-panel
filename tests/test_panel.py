@@ -509,23 +509,44 @@ class TestWheelEmit(unittest.TestCase):
 
 
 class TestRisingActions(unittest.TestCase):
-    def test_empty_keys_any_bit_emits_one_ok(self):
-        self.assertEqual(m._rising_actions(0x01, 0x00, {}), ["OK"])
+    """`keys` is now an ordered list of (mask, action) pairs, and the
+    rising-edge check is per-whole-mask (not per-bit), first match in list
+    order wins, and bit 0 (COMMON_TOUCH_BIT) is masked out of both bitmap
+    and prev_bitmap before any check."""
 
-    def test_empty_keys_multiple_rising_bits_still_one_ok(self):
-        # "one OK per read", not one per bit.
-        self.assertEqual(m._rising_actions(0x07, 0x00, {}), ["OK"])
+    def test_empty_keys_masked_zero_to_nonzero_emits_one_ok(self):
+        # 0x07 masks down to 0x06 (nonzero) -- a real touch, not just bit 0.
+        self.assertEqual(m._rising_actions(0x07, 0x00, []), ["OK"])
+
+    def test_empty_keys_only_common_touch_bit_emits_nothing(self):
+        # bitmap is only bit 0 (a lone ring touch) -- masks down to 0, must
+        # never satisfy the "nonzero" fallback.
+        self.assertEqual(m._rising_actions(0x01, 0x00, []), [])
 
     def test_no_rising_bits_emits_nothing(self):
-        self.assertEqual(m._rising_actions(0x01, 0x01, {}), [])
+        self.assertEqual(m._rising_actions(0x03, 0x03, []), [])
 
-    def test_mapped_keys_translate_rising_bits(self):
-        keys = {0x01: "OK", 0x02: "BACKUP"}
-        self.assertEqual(sorted(m._rising_actions(0x03, 0x00, keys)), ["BACKUP", "OK"])
+    def test_mapped_keys_bleed_across_calls_fires_once_at_completion(self):
+        # DOWN's mask (0x0c) bleeds in one bit at a time across reads, like
+        # the real trace (0x01 -> 0x09 -> 0x0d): must not fire until the
+        # whole mask is satisfied, and then exactly once.
+        keys = [(0x0c, "NEXT")]
+        self.assertEqual(m._rising_actions(0x09, 0x01, keys), [])   # only bit 3 so far
+        self.assertEqual(m._rising_actions(0x0d, 0x09, keys), ["NEXT"])   # mask now complete
+        self.assertEqual(m._rising_actions(0x0d, 0x0d, keys), [])   # already was complete
 
-    def test_mapped_keys_ignore_unmapped_bits(self):
-        keys = {0x01: "OK"}
-        self.assertEqual(m._rising_actions(0x02, 0x00, keys), [])
+    def test_mapped_keys_first_match_in_list_order_wins(self):
+        # Both masks newly satisfied in the same single call -- only the
+        # first one in list order fires.
+        keys = [(0x02, "OK"), (0x0c, "NEXT")]
+        self.assertEqual(m._rising_actions(0x0e, 0x00, keys), ["OK"])
+        keys_reordered = [(0x0c, "NEXT"), (0x02, "OK")]
+        self.assertEqual(m._rising_actions(0x0e, 0x00, keys_reordered), ["NEXT"])
+
+    def test_mapped_keys_only_common_touch_bit_emits_nothing(self):
+        # A bitmap of only bit 0 can never match a real (bit-0-free) mask.
+        keys = [(0x02, "OK"), (0x0c, "NEXT"), (0x30, "RIGHT")]
+        self.assertEqual(m._rising_actions(0x01, 0x00, keys), [])
 
 
 SX8635_SPEC = m.MODELS["rn316"]["sx8635"]
@@ -556,7 +577,7 @@ class FakeSx8635Buttons(m.Sx8635Buttons):
 
 def _sx8635(keys=None, gpio_active=True):
     spec = dict(SX8635_SPEC)
-    spec["keys"] = {} if keys is None else keys
+    spec["keys"] = [] if keys is None else keys
     return FakeSx8635Buttons(FakeGpio(active=gpio_active), spec)
 
 
@@ -590,8 +611,11 @@ class TestSx8635Wheel(unittest.TestCase):
 
 class TestSx8635Buttons(unittest.TestCase):
     def test_rising_bit_ok_when_wheel_not_touched(self):
+        # bit 0 alone (0x01) is a ring touch, never a button, so the
+        # bitmap here must carry a real non-bit-0 bit (0x03 = bit 0 + bit
+        # 1) to exercise the empty-keys "any real touch = one OK" fallback.
         btn = _sx8635()
-        btn.queue = [0x04, 0x01]   # irq(bit2=buttons), capstat_lsb
+        btn.queue = [0x04, 0x03]   # irq(bit2=buttons), capstat_lsb
         self.assertEqual(btn.events(0.0), ["OK"])
 
     def test_ok_suppressed_while_wheel_latched(self):
@@ -601,23 +625,75 @@ class TestSx8635Buttons(unittest.TestCase):
         btn.events(0.0)
         self.assertTrue(btn.wheel_touched)
 
-        # a read where both wheel (bit3) and a button bit (bit2) are set:
-        # with empty keys, the "any bit = OK" fallback must be suppressed
-        # because the wheel is latched touched (provisional, see class doc)
+        # capstat_lsb here is 0x01 -- bit 0 only. Bit 0 (COMMON_TOUCH_BIT) is
+        # masked out before the empty-keys fallback ever looks at the
+        # bitmap, so this reads as "masked bitmap == 0" and never fires,
+        # regardless of the wheel latch. (Wheel latching is exercised above
+        # only to show it has no bearing on this outcome any more -- the
+        # old wheel-latch-based suppression this test used to describe has
+        # been deleted; masking bit 0 makes it unnecessary.)
         btn.queue = [0x0C, 0x10, 0x00, 0x06, 0x01]
         self.assertEqual(btn.events(0.0), [])
 
     def test_mapped_key_not_suppressed_by_wheel_latch(self):
-        # a real, mapped key should still fire even while the wheel is
-        # latched touched -- only the empty-keys "any bit" fallback is
-        # suppressed, per the class docstring.
-        btn = _sx8635(keys={0x01: "BACKUP"})
+        # a real, mapped pad (OK, mask 0x02) should still fire even while
+        # the wheel is latched touched -- the trace data shows mapped pads
+        # report reg 0x01 == 0x00 (no ring touch) during their own presses,
+        # so they're physically independent of the ring and must never be
+        # suppressed by a wheel latch.
+        btn = _sx8635(keys=[(0x02, "OK")])
         btn.queue = [0x08, 0x10, 0x00, 0x05]
         btn.events(0.0)
         self.assertTrue(btn.wheel_touched)
 
-        btn.queue = [0x0C, 0x10, 0x00, 0x06, 0x01]
-        self.assertEqual(btn.events(0.0), ["BACKUP"])
+        # wheel position unchanged (0x05) so the wheel branch contributes
+        # no NEXT/PREV of its own; capstat_lsb=0x03 (bit 0 + bit 1) rises
+        # OK's mask (0x02) from 0.
+        btn.queue = [0x0C, 0x10, 0x00, 0x05, 0x03]
+        self.assertEqual(btn.events(0.0), ["OK"])
+
+    def test_only_common_touch_bit_yields_no_action_with_real_keys_wheel_not_touched(self):
+        # A lone ring touch (bitmap == 0x01) must never fire a mapped
+        # action, wheel latch or not.
+        btn = _sx8635(keys=SX8635_SPEC["keys"])
+        btn.queue = [0x04, 0x01]
+        self.assertEqual(btn.events(0.0), [])
+
+    def test_only_common_touch_bit_yields_no_action_with_real_keys_wheel_touched(self):
+        btn = _sx8635(keys=SX8635_SPEC["keys"])
+        btn.queue = [0x08, 0x10, 0x00, 0x05]   # latch the wheel touched
+        btn.events(0.0)
+        self.assertTrue(btn.wheel_touched)
+
+        btn.queue = [0x0C, 0x10, 0x00, 0x05, 0x01]
+        self.assertEqual(btn.events(0.0), [])
+
+    def test_ok_press_real_trace(self):
+        # Real-hardware trace for one OK press: 0x01 -> 0x03 -> 0x23 -> 0x00.
+        btn = _sx8635(keys=SX8635_SPEC["keys"])
+        results = []
+        for bitmap in (0x01, 0x03, 0x23, 0x00):
+            btn.queue = [0x04, bitmap]   # irq=buttons only
+            results += btn.events(0.0)
+        self.assertEqual(results, ["OK"])
+
+    def test_down_press_real_trace(self):
+        # Real-hardware trace for one DOWN press: 0x01 -> 0x09 -> 0x0d -> 0x00.
+        btn = _sx8635(keys=SX8635_SPEC["keys"])
+        results = []
+        for bitmap in (0x01, 0x09, 0x0d, 0x00):
+            btn.queue = [0x04, bitmap]
+            results += btn.events(0.0)
+        self.assertEqual(results, ["NEXT"])
+
+    def test_right_press_real_trace(self):
+        # Real-hardware trace for one RIGHT press: 0x01 -> 0x21 -> 0x31 -> 0x00.
+        btn = _sx8635(keys=SX8635_SPEC["keys"])
+        results = []
+        for bitmap in (0x01, 0x21, 0x31, 0x00):
+            btn.queue = [0x04, bitmap]
+            results += btn.events(0.0)
+        self.assertEqual(results, ["RIGHT"])
 
     def test_irqsrc_zero_returns_no_events(self):
         btn = _sx8635()
