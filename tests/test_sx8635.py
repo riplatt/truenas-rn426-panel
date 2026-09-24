@@ -183,12 +183,30 @@ class TestSx8635Buttons(unittest.TestCase):
 
     def test_down_press_real_trace(self):
         # Real-hardware trace for one DOWN press: 0x01 -> 0x09 -> 0x0d -> 0x00.
+        # Activity-only: it wakes the display but never turns a page.
         btn = _sx8635(keys=SX8635_SPEC["keys"])
         results = []
         for bitmap in (0x01, 0x09, 0x0d, 0x00):
             btn.queue = [0x04, bitmap]
             results += btn.events(0.0)
-        self.assertEqual(results, ["NEXT"])
+        self.assertEqual(results, ["DOWN"])
+
+    def test_slide_through_bottom_never_turns_a_page_from_buttons(self):
+        # A slide across the bottom of the ring crosses CAP2-5, which the
+        # factory layout reports as button bits 2-5. The per-read order below
+        # is RECONSTRUCTED from the electrode geometry (the watcher traces
+        # don't record reg 0x02 per read): CCW enters CAP2 first, CW enters
+        # CAP5 first. Neither direction may emit NEXT or PREV from the
+        # button path; only the wheel turns pages.
+        ccw = [0x01, 0x05, 0x0d, 0x09, 0x19, 0x11, 0x31, 0x21, 0x01, 0x00]
+        for name, seq in (("ccw", ccw), ("cw", list(reversed(ccw)))):
+            btn = _sx8635(keys=SX8635_SPEC["keys"])
+            results = []
+            for bitmap in seq:
+                btn.queue = [0x04, bitmap]
+                results += btn.events(0.0)
+            self.assertNotIn("NEXT", results, name)
+            self.assertNotIn("PREV", results, name)
 
     def test_right_press_real_trace(self):
         # Real-hardware trace for one RIGHT press: 0x01 -> 0x21 -> 0x31 -> 0x00.

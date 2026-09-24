@@ -62,7 +62,12 @@ MODELS = {
             # ring counter-clockwise, not by pressing a button.
             "keys": [
                 (0x02, "OK"),      # bit 1: centre OK pad -> refresh
-                (0x0c, "NEXT"),    # bits 2|3: DOWN pad -> NEXT page (mirrors the RN426's DOWN->NEXT)
+                # bits 2|3 are not a DOWN pad: under the chip's factory layout
+                # CAP2/CAP3 are ring segments configured as buttons, so a
+                # slide through the bottom of the ring lights this mask too.
+                # As NEXT it fired mid-scroll in either direction; "DOWN" is
+                # activity-only, so only the wheel turns pages here.
+                (0x0c, "DOWN"),
                 (0x30, "RIGHT"),   # bits 4|5: RIGHT pad -> activity-only, like the RN426's LEFT/RIGHT
                                    # (run()/_apply_actions already treats an unrecognized
                                    # action as activity-only: resets idle, wakes if asleep,
