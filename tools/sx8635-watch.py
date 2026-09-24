@@ -9,7 +9,7 @@ implements, and .claude/advice/sx8635-re-report.md for the register facts
 disassembly plus the SX8636 datasheet; that doc is authoritative over any
 paraphrase in comments here).
 
-Two modes:
+Three modes:
   * default: IDLE / OK / OTHER / CW / CCW phases, for a quick "does anything
     respond at all" pass.
   * --map (or SX_WATCH_MAP=1): IDLE / OK / UP / RIGHT / DOWN / LEFT / CW /
@@ -18,6 +18,16 @@ Two modes:
     seen in that phase can be attributed to it. Ends with a table of bits
     unique to each phase (i.e. not also seen during the IDLE background)
     and the wheel position range/direction seen in each wheel phase.
+  * --tap (or SX_WATCH_TAP=1): calibration run for compass-point taps
+    (touch and lift without sliding) versus slides -- see
+    .claude/advice/rn316-wheel-tap-design.md Q3/Q5. IDLE / OK / TAPUP /
+    TAPRIGHT / TAPDOWN / TAPLEFT / REST / SLOWCW / FASTCW / SLOWCCW /
+    FASTCCW / IDLE. Ends with an episodes() table (see that function) and
+    a per-phase landing/excursion/path-length summary.
+
+Every mode's trace line now also prints reg 0x02 (the button bitmap,
+"btn="), not just on IrqSrc "buttons" events -- it was already read on
+every register-block read, just not shown.
 
 *** WHY THIS TOOL NEVER WRITES THE CHIP, EVER ***
 The SX8635 has an NVM (permanent, burns up to 3 times) shadowed by a
@@ -155,6 +165,116 @@ def compute_bits_unique_to_phase(phase_bitmaps, baseline_names, phase_names):
     for name in phase_names:
         phase_bits = bitmap_union_bits(phase_bitmaps.get(name, ()))
         result[name] = sorted(phase_bits - baseline_bits)
+    return result
+
+
+def wrap_delta(b, a, modulus):
+    """Wrap-aware delta b-a on a ring of size modulus (positions 0..modulus-1).
+    Pure, no I/O. Used by episodes() for excursion/path_len so a slide that
+    crosses the 0/modulus-1 seam reads as a small step, not a huge one."""
+    m = modulus
+    return ((b - a + m // 2) % m) - m // 2
+
+
+def infer_modulus(samples):
+    """samples: list of per-read sample dicts (see episodes()). Default
+    modulus for wrap-aware math: observed max position + 1, rounded up to
+    a multiple of 10. Pure, no I/O."""
+    max_pos = 0
+    for s in samples:
+        if s["pos"] > max_pos:
+            max_pos = s["pos"]
+    modulus = max_pos + 1
+    if modulus % 10:
+        modulus += 10 - (modulus % 10)
+    return modulus
+
+
+def episodes(samples, modulus=None):
+    """samples: list of per-read sample dicts, in time order, each with keys
+    t, phase, irq, cmsb, btn, pos (the record this tool already builds per
+    read; see run_phase). Pure, no I/O.
+
+    A touch episode starts at the first sample where cmsb & 0x10 (wheel
+    touched) is set OR the masked button bitmap (btn & ~0x01 -- bit0 is
+    noise/reserved, not a real button) is nonzero, and ends at the first
+    sample where both are clear (that clear sample's time becomes t_end,
+    but it is not itself counted as part of the episode).
+
+    modulus: wrap-aware ring size for excursion/path_len (see wrap_delta).
+    Default: infer_modulus(samples).
+
+    Returns a list of dicts, one per episode, in time order:
+      phase        -- phase name of the sample that started the episode
+      t_start      -- t of the first sample in the episode
+      t_end        -- t of the sample where the episode was detected closed
+                       (the closing/clear sample, or the last sample if the
+                       episode was still open at the end of the input)
+      duration     -- t_end - t_start
+      landing_pos  -- pos of the first sample in the episode with cmsb & 0x10
+                       set, or None if the wheel was never touched (e.g. a
+                       button-only episode)
+      release_pos  -- pos of the last such sample, or None
+      excursion    -- max absolute wrap-aware offset from landing_pos seen
+                       while the wheel was touched, 0 if never touched
+      path_len     -- sum of absolute wrap-aware deltas between consecutive
+                       wheel-touched positions, 0 if never touched or only
+                       touched once
+      rotation_bits_seen -- union (bitwise OR) of cmsb & 0x60 over the
+                       episode's samples
+      btn_bitmaps  -- sorted list of distinct nonzero raw btn (reg 0x02)
+                       values seen during the episode
+      n_samples    -- number of samples counted as part of the episode
+                       (the closing/clear sample is not included)
+    """
+    if modulus is None:
+        modulus = infer_modulus(samples)
+
+    result = []
+    cur = None
+    last_wheel_pos = None
+
+    for s in samples:
+        wheel_touched = bool(s["cmsb"] & 0x10)
+        active = wheel_touched or bool(s["btn"] & ~0x01)
+
+        if active:
+            if cur is None:
+                cur = {
+                    "phase": s["phase"], "t_start": s["t"], "t_end": s["t"],
+                    "duration": 0.0, "landing_pos": None, "release_pos": None,
+                    "excursion": 0, "path_len": 0, "rotation_bits_seen": 0,
+                    "btn_bitmaps": set(), "n_samples": 0,
+                }
+                last_wheel_pos = None
+            cur["n_samples"] += 1
+            cur["t_end"] = s["t"]
+            cur["rotation_bits_seen"] |= (s["cmsb"] & 0x60)
+            if s["btn"]:
+                cur["btn_bitmaps"].add(s["btn"])
+            if wheel_touched:
+                if cur["landing_pos"] is None:
+                    cur["landing_pos"] = s["pos"]
+                cur["release_pos"] = s["pos"]
+                if last_wheel_pos is not None:
+                    cur["path_len"] += abs(wrap_delta(s["pos"], last_wheel_pos, modulus))
+                last_wheel_pos = s["pos"]
+                excursion = abs(wrap_delta(s["pos"], cur["landing_pos"], modulus))
+                if excursion > cur["excursion"]:
+                    cur["excursion"] = excursion
+        else:
+            if cur is not None:
+                cur["t_end"] = s["t"]
+                cur["duration"] = cur["t_end"] - cur["t_start"]
+                cur["btn_bitmaps"] = sorted(cur["btn_bitmaps"])
+                result.append(cur)
+                cur = None
+
+    if cur is not None:
+        cur["duration"] = cur["t_end"] - cur["t_start"]
+        cur["btn_bitmaps"] = sorted(cur["btn_bitmaps"])
+        result.append(cur)
+
     return result
 
 
@@ -394,6 +514,33 @@ MAP_WHEEL_PHASE_NAMES = ["CW", "CCW"]
 BUTTON_PHASE_NAMES = frozenset(["OK", "OTHER", "UP", "RIGHT", "DOWN", "LEFT"])
 WHEEL_PHASE_NAMES = frozenset(["CW", "CCW"])
 
+# --tap / SX_WATCH_TAP=1: calibration run for compass-point taps versus
+# slides (see .claude/advice/rn316-wheel-tap-design.md Q3/Q5). Idle phases
+# fixed at 5s, same rationale as MAP_IDLE_SECS above. REST needs at least
+# 6s to hold a still finger for 3s plus slack either side of the countdown,
+# so it floors ACTIVE_SECS rather than taking it verbatim.
+TAP_IDLE_SECS = 5
+TAP_REST_SECS = max(ACTIVE_SECS, 6)
+
+TAP_PHASES = [
+    {"name": "IDLE1",    "prompt": "IDLE -- hands off the panel entirely", "secs": TAP_IDLE_SECS},
+    {"name": "OK",       "prompt": "Touch and lift the centre OK button, twice -- do not slide", "secs": ACTIVE_SECS},
+    {"name": "TAPUP",    "prompt": "Tap the TOP of the ring 3 times: touch and lift, do not slide", "secs": ACTIVE_SECS},
+    {"name": "TAPRIGHT", "prompt": "Tap the RIGHT of the ring 3 times: touch and lift, do not slide", "secs": ACTIVE_SECS},
+    {"name": "TAPDOWN",  "prompt": "Tap the BOTTOM of the ring 3 times: touch and lift, do not slide", "secs": ACTIVE_SECS},
+    {"name": "TAPLEFT",  "prompt": "Tap the LEFT of the ring 3 times: touch and lift, do not slide", "secs": ACTIVE_SECS},
+    {"name": "REST",     "prompt": "Rest a fingertip at the TOP of the ring for 3s without moving, then lift", "secs": TAP_REST_SECS},
+    {"name": "SLOWCW",   "prompt": "Rotate the wheel SLOWLY CLOCKWISE one full turn, starting at the top", "secs": ACTIVE_SECS},
+    {"name": "FASTCW",   "prompt": "Rotate the wheel FAST CLOCKWISE one full turn, starting at the top", "secs": ACTIVE_SECS},
+    {"name": "SLOWCCW",  "prompt": "Rotate the wheel SLOWLY COUNTER-CLOCKWISE one full turn, starting at the top", "secs": ACTIVE_SECS},
+    {"name": "FASTCCW",  "prompt": "Rotate the wheel FAST COUNTER-CLOCKWISE one full turn, starting at the top", "secs": ACTIVE_SECS},
+    {"name": "IDLE2",    "prompt": "IDLE -- hands off the panel entirely", "secs": TAP_IDLE_SECS},
+]
+
+TAP_TAP_PHASE_NAMES = ["TAPUP", "TAPRIGHT", "TAPDOWN", "TAPLEFT"]
+TAP_REST_PHASE_NAME = "REST"
+TAP_TURN_PHASE_NAMES = ["SLOWCW", "FASTCW", "SLOWCCW", "FASTCCW"]
+
 
 def new_phase_summary():
     return {
@@ -407,7 +554,7 @@ def new_phase_summary():
     }
 
 
-def run_phase(i2c_fd, port_fd, nirq_port, nirq_bit, phase, state, overall):
+def run_phase(i2c_fd, port_fd, nirq_port, nirq_bit, phase, state, overall, sample_log=None):
     name = phase["name"]
     psum = new_phase_summary()
     t_end = time.perf_counter() + phase["secs"]
@@ -477,12 +624,16 @@ def run_phase(i2c_fd, port_fd, nirq_port, nirq_bit, phase, state, overall):
             if name in WHEEL_PHASE_NAMES and (irq & 0x08) and (r1 & 0x10) and moved:
                 overall["wheel_activity_seen"] = True
 
+            t = loop_t - state["t0"]
+            if sample_log is not None:
+                sample_log.append({"t": t, "phase": name, "irq": irq,
+                                    "cmsb": r1, "btn": r2, "pos": pos})
+
             changed = (r1 != state["last_r1"] or r2 != state["last_r2"]
                        or r3 != state["last_r3"] or r4 != state["last_r4"])
             if irq != 0 or changed:
-                t = loop_t - state["t0"]
-                out("t=%7.3f phase=%-5s nirq=%d->%d irq=%s cmsb=0x%02x msb=0x%02x lsb=0x%02x pos=0x%04x"
-                    % (t, name, nirq_now, nirq_after, format_irq(irq), r1, r3, r4, pos))
+                out("t=%7.3f phase=%-5s nirq=%d->%d irq=%s cmsb=0x%02x btn=0x%02x msb=0x%02x lsb=0x%02x pos=0x%04x"
+                    % (t, name, nirq_now, nirq_after, format_irq(irq), r1, r2, r3, r4, pos))
 
             state["last_r1"], state["last_r2"] = r1, r2
             state["last_r3"], state["last_r4"] = r3, r4
@@ -552,6 +703,61 @@ def print_map_summary(phase_summaries):
     out("  CCW phase direction: %s" % detect_wheel_direction(ccw_pos))
 
 
+def _fmt_pos(p):
+    return "0x%04x" % p if p is not None else "none"
+
+
+def print_tap_summary(all_episodes, max_pos, modulus):
+    """tap-mode-only final report section: the episodes table (calibration
+    input) plus per-phase landing/excursion/path stats. episodes() itself is
+    pure and unit-tested; this function just formats and prints."""
+    out("\n=== Episodes ===")
+    if not all_episodes:
+        out("  none")
+    for ep in all_episodes:
+        out("  phase=%-8s t=%7.3f..%7.3f dur=%6.3f landing=%s release=%s "
+            "excursion=%d path_len=%d rot=0x%02x btn=%s n=%d"
+            % (ep["phase"], ep["t_start"], ep["t_end"], ep["duration"],
+               _fmt_pos(ep["landing_pos"]), _fmt_pos(ep["release_pos"]),
+               ep["excursion"], ep["path_len"], ep["rotation_bits_seen"],
+               [("0x%02x" % v) for v in ep["btn_bitmaps"]], ep["n_samples"]))
+
+    by_phase = {}
+    for ep in all_episodes:
+        by_phase.setdefault(ep["phase"], []).append(ep)
+
+    out("\n=== Tap/turn phase summary ===")
+    for name in TAP_TAP_PHASE_NAMES:
+        eps = by_phase.get(name, [])
+        if not eps:
+            out("  %-8s no episodes" % name)
+            continue
+        landings = [e["landing_pos"] for e in eps if e["landing_pos"] is not None]
+        mean_landing = (float(sum(landings)) / len(landings)) if landings else None
+        out("  %-8s n_taps=%d landing mean=%s min=%s max=%s max_excursion=%d max_duration=%6.3f"
+            % (name, len(eps),
+               ("%.1f" % mean_landing) if mean_landing is not None else "none",
+               _fmt_pos(min(landings)) if landings else "none",
+               _fmt_pos(max(landings)) if landings else "none",
+               max(e["excursion"] for e in eps),
+               max(e["duration"] for e in eps)))
+
+    rest_eps = by_phase.get(TAP_REST_PHASE_NAME, [])
+    if rest_eps:
+        out("  %-8s max_excursion(jitter)=%d" % (TAP_REST_PHASE_NAME, max(e["excursion"] for e in rest_eps)))
+    else:
+        out("  %-8s no episodes" % TAP_REST_PHASE_NAME)
+
+    for name in TAP_TURN_PHASE_NAMES:
+        eps = by_phase.get(name, [])
+        total_path = sum(e["path_len"] for e in eps)
+        rotation_seen = any(e["rotation_bits_seen"] for e in eps)
+        out("  %-8s total_path_len=%d rotation_bits_seen=%s" % (name, total_path, rotation_seen))
+
+    out("\nObserved max position: %s" % _fmt_pos(max_pos))
+    out("Inferred modulus: %d" % modulus)
+
+
 # --------------------------------------------------------------------------
 def main():
     if os.name != "posix" or not os.path.isdir("/sys"):
@@ -560,6 +766,7 @@ def main():
 
     force = "--force" in sys.argv[1:]
     map_mode = "--map" in sys.argv[1:] or os.environ.get("SX_WATCH_MAP") == "1"
+    tap_mode = "--tap" in sys.argv[1:] or os.environ.get("SX_WATCH_TAP") == "1"
     check_preconditions(force)
 
     out("sx8635-watch.py -- read-only SX8635 diagnostic")
@@ -601,20 +808,32 @@ def main():
     except OSError as e:
         die("chip read failed during startup: %s -- see the 'chip absent' verdict row" % e)
 
-    phases = MAP_PHASES if map_mode else PHASES
+    # --tap takes precedence over --map if both are somehow given.
+    if tap_mode:
+        phases = TAP_PHASES
+        mode_label = " (tap calibration mode)"
+        map_mode = False
+    elif map_mode:
+        phases = MAP_PHASES
+        mode_label = " (mapping mode)"
+    else:
+        phases = PHASES
+        mode_label = ""
+
     total_secs = sum(p["secs"] for p in phases)
-    out("\n=== Phased interactive trace%s, ~%ds total ==="
-        % (" (mapping mode)" if map_mode else "", total_secs))
+    out("\n=== Phased interactive trace%s, ~%ds total ===" % (mode_label, total_secs))
     state = {
         "last_read_t": 0.0, "sub_loop": False, "oserror_count": 0,
         "last_r1": None, "last_r2": None, "last_r3": None, "last_r4": None,
         "last_pos": None, "t0": time.perf_counter(),
+        "samples": [] if tap_mode else None,
     }
     phase_summaries = {}
     for phase in phases:
         countdown(phase["prompt"])
         out("\n>>> phase %s (%ds): %s" % (phase["name"], phase["secs"], phase["prompt"]))
-        psum = run_phase(i2c_fd, port_fd, nirq_port, nirq_bit, phase, state, overall)
+        psum = run_phase(i2c_fd, port_fd, nirq_port, nirq_bit, phase, state, overall,
+                          sample_log=state["samples"])
         print_phase_summary(phase, psum, map_mode=map_mode)
         phase_summaries[phase["name"]] = psum
 
@@ -626,10 +845,17 @@ def main():
     if map_mode:
         print_map_summary(phase_summaries)
 
+    if tap_mode:
+        samples = state["samples"]
+        max_pos = max((s["pos"] for s in samples), default=0)
+        modulus = infer_modulus(samples) if samples else 10
+        all_episodes = episodes(samples, modulus=modulus)
+        print_tap_summary(all_episodes, max_pos, modulus)
+
     out_path = write_report()
     print()
     print("Please paste the contents of %s (or attach it) into the issue." % out_path)
-    if not map_mode:
+    if not map_mode and not tap_mode:  # map_mode is forced False above when tap_mode is set
         print("Say which physical pad you touched during the OK and OTHER phases --")
         print("this tool only knows which phase was running, not which pad is which.")
         print("(Re-run with --map to have it ask for each pad separately instead.)")

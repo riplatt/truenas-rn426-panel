@@ -212,5 +212,161 @@ class TestDetectWheelDirection(unittest.TestCase):
         self.assertEqual(m.detect_wheel_direction([0x05, 0x08, 0x05]), "ambiguous")
 
 
+def _sample(t, phase="X", irq=0x00, cmsb=0x00, btn=0x00, pos=0x00):
+    return {"t": t, "phase": phase, "irq": irq, "cmsb": cmsb, "btn": btn, "pos": pos}
+
+
+class TestEpisodes(unittest.TestCase):
+    """episodes() -- see tools/sx8635-watch.py for the field contract. Uses
+    synthetic per-read sample sequences (no hardware): each is what a real
+    run_phase() loop would have appended to its sample_log."""
+
+    def test_clean_tap_small_excursion_short_duration(self):
+        # touch, wobble by one tick, lift -- a real compass tap
+        samples = [
+            _sample(0.0, phase="TAPUP", cmsb=0x00, btn=0x00, pos=0x08),
+            _sample(0.1, phase="TAPUP", cmsb=0x10, btn=0x00, pos=0x08),
+            _sample(0.2, phase="TAPUP", cmsb=0x10, btn=0x00, pos=0x09),
+            _sample(0.3, phase="TAPUP", cmsb=0x10, btn=0x00, pos=0x08),
+            _sample(0.4, phase="TAPUP", cmsb=0x00, btn=0x00, pos=0x08),
+        ]
+        eps = m.episodes(samples)
+        self.assertEqual(len(eps), 1)
+        ep = eps[0]
+        self.assertEqual(ep["phase"], "TAPUP")
+        self.assertAlmostEqual(ep["t_start"], 0.1)
+        self.assertAlmostEqual(ep["t_end"], 0.4)
+        self.assertAlmostEqual(ep["duration"], 0.3)
+        self.assertEqual(ep["landing_pos"], 0x08)
+        self.assertEqual(ep["release_pos"], 0x08)
+        self.assertEqual(ep["excursion"], 1)
+        self.assertEqual(ep["path_len"], 2)
+        self.assertEqual(ep["rotation_bits_seen"], 0)
+        self.assertEqual(ep["btn_bitmaps"], [])
+        self.assertEqual(ep["n_samples"], 3)
+
+    def test_slide_large_path_and_rotation_bits(self):
+        # a fast slide: rotation bits (cmsb & 0x60) set, big path/excursion
+        samples = [
+            _sample(0.0, phase="FASTCW", cmsb=0x00, pos=0x00),
+            _sample(0.1, phase="FASTCW", cmsb=0x10, pos=0x00),
+            _sample(0.2, phase="FASTCW", cmsb=0x30, pos=0x0F),
+            _sample(0.3, phase="FASTCW", cmsb=0x30, pos=0x1E),
+            _sample(0.4, phase="FASTCW", cmsb=0x30, pos=0x2D),
+            _sample(0.5, phase="FASTCW", cmsb=0x00, pos=0x2D),
+        ]
+        eps = m.episodes(samples, modulus=80)
+        self.assertEqual(len(eps), 1)
+        ep = eps[0]
+        self.assertEqual(ep["landing_pos"], 0x00)
+        self.assertEqual(ep["release_pos"], 0x2D)
+        self.assertEqual(ep["path_len"], 45)
+        self.assertEqual(ep["excursion"], 35)
+        self.assertEqual(ep["rotation_bits_seen"], 0x20)
+        self.assertEqual(ep["n_samples"], 4)
+
+    def test_wrap_crossing_slide_small_excursion_correct_path(self):
+        # positions 0x1d,0x1e,0x00,0x02 with M=0x1f: each step is a small
+        # wrap-aware delta, not a huge naive jump through the seam
+        samples = [
+            _sample(0.0, phase="SLOWCCW", cmsb=0x00, pos=0x1d),
+            _sample(0.1, phase="SLOWCCW", cmsb=0x10, pos=0x1d),
+            _sample(0.2, phase="SLOWCCW", cmsb=0x10, pos=0x1e),
+            _sample(0.3, phase="SLOWCCW", cmsb=0x10, pos=0x00),
+            _sample(0.4, phase="SLOWCCW", cmsb=0x10, pos=0x02),
+            _sample(0.5, phase="SLOWCCW", cmsb=0x00, pos=0x02),
+        ]
+        eps = m.episodes(samples, modulus=0x1f)
+        self.assertEqual(len(eps), 1)
+        ep = eps[0]
+        self.assertEqual(ep["landing_pos"], 0x1d)
+        self.assertEqual(ep["release_pos"], 0x02)
+        self.assertEqual(ep["path_len"], 4)
+        self.assertEqual(ep["excursion"], 4)
+        self.assertEqual(ep["n_samples"], 4)
+
+    def test_button_only_episode_no_cmsb(self):
+        # OK press: reg 0x02 goes 0x01 (bit0 noise, masked out) -> 0x03
+        # (bit1 = OK, starts the episode) -> 0x00 (clear, ends it)
+        samples = [
+            _sample(0.0, phase="OK", cmsb=0x00, btn=0x00, pos=0x00),
+            _sample(0.1, phase="OK", cmsb=0x00, btn=0x01, pos=0x00),
+            _sample(0.2, phase="OK", cmsb=0x00, btn=0x03, pos=0x00),
+            _sample(0.3, phase="OK", cmsb=0x00, btn=0x00, pos=0x00),
+        ]
+        eps = m.episodes(samples)
+        self.assertEqual(len(eps), 1)
+        ep = eps[0]
+        self.assertAlmostEqual(ep["t_start"], 0.2)
+        self.assertAlmostEqual(ep["t_end"], 0.3)
+        self.assertIsNone(ep["landing_pos"])
+        self.assertIsNone(ep["release_pos"])
+        self.assertEqual(ep["excursion"], 0)
+        self.assertEqual(ep["path_len"], 0)
+        self.assertEqual(ep["btn_bitmaps"], [0x03])
+        self.assertEqual(ep["n_samples"], 1)
+
+    def test_episode_open_at_end_of_samples_closes_at_last_sample(self):
+        samples = [
+            _sample(0.0, phase="TAPLEFT", cmsb=0x00, pos=0x05),
+            _sample(0.1, phase="TAPLEFT", cmsb=0x10, pos=0x05),
+            _sample(0.2, phase="TAPLEFT", cmsb=0x10, pos=0x06),
+        ]
+        eps = m.episodes(samples)
+        self.assertEqual(len(eps), 1)
+        ep = eps[0]
+        self.assertAlmostEqual(ep["t_start"], 0.1)
+        self.assertAlmostEqual(ep["t_end"], 0.2)
+        self.assertEqual(ep["landing_pos"], 0x05)
+        self.assertEqual(ep["release_pos"], 0x06)
+        self.assertEqual(ep["n_samples"], 2)
+
+    def test_two_episodes_separated_by_idle_sample_are_split(self):
+        samples = [
+            _sample(0.0, phase="TAPDOWN", cmsb=0x00, pos=0x00),
+            _sample(0.1, phase="TAPDOWN", cmsb=0x10, pos=0x00),
+            _sample(0.2, phase="TAPDOWN", cmsb=0x00, pos=0x00),
+            _sample(0.3, phase="TAPDOWN", cmsb=0x10, pos=0x00),
+            _sample(0.4, phase="TAPDOWN", cmsb=0x00, pos=0x00),
+        ]
+        eps = m.episodes(samples)
+        self.assertEqual(len(eps), 2)
+        self.assertAlmostEqual(eps[0]["t_start"], 0.1)
+        self.assertAlmostEqual(eps[0]["t_end"], 0.2)
+        self.assertAlmostEqual(eps[1]["t_start"], 0.3)
+        self.assertAlmostEqual(eps[1]["t_end"], 0.4)
+        self.assertEqual(eps[0]["n_samples"], 1)
+        self.assertEqual(eps[1]["n_samples"], 1)
+
+
+class TestPhaseListsUnchanged(unittest.TestCase):
+    """Adding --tap must not change default or --map phase behaviour, apart
+    from the added btn= trace column (which isn't part of these lists).
+    Compare against literals copied from the pre-change source."""
+
+    def test_default_phases_unchanged(self):
+        self.assertEqual(m.PHASES, [
+            {"name": "IDLE1", "prompt": "IDLE -- hands off the panel entirely", "secs": m.IDLE_SECS},
+            {"name": "OK",    "prompt": "Touch and hold the OK button for about 1s, then release", "secs": m.ACTIVE_SECS},
+            {"name": "OTHER", "prompt": "Touch any OTHER front pad (not OK)", "secs": m.ACTIVE_SECS},
+            {"name": "CW",    "prompt": "Rotate the wheel slowly CLOCKWISE one full turn", "secs": m.ACTIVE_SECS},
+            {"name": "CCW",   "prompt": "Rotate the wheel slowly COUNTER-CLOCKWISE one full turn", "secs": m.ACTIVE_SECS},
+            {"name": "IDLE2", "prompt": "IDLE -- hands off the panel entirely", "secs": m.IDLE_SECS},
+        ])
+
+    def test_map_phases_unchanged(self):
+        self.assertEqual(m.MAP_PHASES, [
+            {"name": "IDLE1", "prompt": "IDLE -- hands off the panel entirely", "secs": m.MAP_IDLE_SECS},
+            {"name": "OK",    "prompt": "Touch and release the centre OK button, twice", "secs": m.ACTIVE_SECS},
+            {"name": "UP",    "prompt": "Touch and release the TOP arrow pad, twice -- do not slide", "secs": m.ACTIVE_SECS},
+            {"name": "RIGHT", "prompt": "Touch and release the RIGHT arrow pad, twice -- do not slide", "secs": m.ACTIVE_SECS},
+            {"name": "DOWN",  "prompt": "Touch and release the BOTTOM arrow pad, twice -- do not slide", "secs": m.ACTIVE_SECS},
+            {"name": "LEFT",  "prompt": "Touch and release the LEFT arrow pad, twice -- do not slide", "secs": m.ACTIVE_SECS},
+            {"name": "CW",    "prompt": "Slide the wheel CLOCKWISE one full turn, starting at the top", "secs": m.ACTIVE_SECS},
+            {"name": "CCW",   "prompt": "Slide the wheel COUNTER-CLOCKWISE one full turn, starting at the top", "secs": m.ACTIVE_SECS},
+            {"name": "IDLE2", "prompt": "IDLE -- hands off the panel entirely", "secs": m.MAP_IDLE_SECS},
+        ])
+
+
 if __name__ == "__main__":
     unittest.main()
