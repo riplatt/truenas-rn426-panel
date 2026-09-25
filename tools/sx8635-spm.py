@@ -6,20 +6,27 @@ for exactly what it can and cannot write, and why; this file is a thin CLI
 around that module, plus a read-only `dump` of the full 128-byte SPM.
 
 Subcommands:
-  dump             -- read and decode all 16 SPM blocks (128 bytes),
-                       read-only, via its own separate whitelist. Always
-                       closes its window afterwards, even on error.
-  capmode [--yes]  -- without --yes: print what would change, write
-                       nothing, exit 0. With --yes: apply the CapMode
-                       change (rnpanel.sx8635_spm.apply_capmode), print
-                       before/after block-1 bytes and the result, then a
-                       full read-only dump of the chip and next steps.
-                       Refuses to write over a chip state it doesn't
-                       recognise (only the factory "qsm" sentinel is ever
-                       written over) -- see apply_capmode's docstring.
-  close            -- recover() + force the SPM window closed. Use this
-                       if a previous run of this tool (or a crash) left
-                       it open.
+  dump              -- read and decode all 16 SPM blocks (128 bytes),
+                        read-only, via its own separate whitelist. Always
+                        closes its window afterwards, even on error.
+  capsense [--yes]  -- without --yes: print the three rows that would be
+                        written, write nothing, exit 0. With --yes: apply
+                        NETGEAR's capsense rows
+                        (rnpanel.sx8635_spm.apply_capsense), print the
+                        before/after rows and the result, then a full
+                        read-only dump of the chip and next steps. Refuses
+                        to write over a chip state it doesn't recognise
+                        (only the factory "qsm" sentinel is ever written
+                        over, and a chip already on the netgear layout is
+                        never "topped up") -- see apply_capsense's
+                        docstring.
+  close             -- recover() + force the SPM window closed. Use this
+                        if a previous run of this tool (or a crash) left
+                        it open.
+
+`capmode` is no longer a subcommand -- it was never announced outside this
+codebase (see the RN316 post-write review), so it was renamed rather than
+kept as a deprecated alias. Running `capmode` prints the usage line above.
 
 Same guardrails as tools/sx8635-watch.py: refuses to run unless DMI
 product_name is "ReadyNAS 316" (--force overrides), refuses if
@@ -143,7 +150,7 @@ def open_chip():
 # --------------------------------------------------------------------------
 # dump: its own read-only window walk over all 16 SPM blocks, via
 # rnpanel.sx8635_spm's SEPARATE dump whitelist (_wr_dump/DUMP_WHITELIST).
-# This never shares a code path with apply_capmode().
+# This never shares a code path with apply_capsense().
 # --------------------------------------------------------------------------
 def read_all_spm(fd):
     """Read all 128 SPM bytes (16 blocks of 8), read-only. Always closes
@@ -213,16 +220,25 @@ def cmd_dump(fd):
     return 0
 
 
-def cmd_capmode(fd, yes):
+def format_row(base, row):
+    return "0x%02x: " % base + " ".join("%02x" % b for b in row)
+
+
+def cmd_capsense(fd, yes):
     if not yes:
-        out("Would read SPM block 1 (SPM 0x08-0x0F). If CapMode (0x0A-0x0C) is not")
-        out("already 0x%02x 0x%02x 0x%02x, and the block otherwise decodes as the factory"
-            % spm.CAPMODE)
-        out("QSM layout, would write those three bytes (leaving the other five bytes in")
-        out("the block exactly as read), wait for the SPM-write-done interrupt or a short")
-        out("timeout, verify by re-reading, and trigger sensor compensation. A chip that")
-        out("doesn't decode as either the factory or the target layout is left untouched.")
-        out("Pass --yes to actually do it. Nothing was written.")
+        out("Would read SPM block 1 (SPM 0x08-0x0F). A chip that doesn't decode as")
+        out("either the factory QSM layout or NETGEAR's netgear layout is left")
+        out("untouched, nothing written. A chip that already decodes as netgear has")
+        out("blocks 2 and 3 read too and is reported 'already' (all three rows match)")
+        out("or 'capmode-only' (they don't) -- either way nothing is written; this tool")
+        out("never tops up a partial match. Otherwise (factory QSM), would write these")
+        out("three constant rows, in this order (CapMode/block 1 last, so an")
+        out("interrupted run leaves the chip decoding as QSM and a re-run starts clean):")
+        for base in spm._WRITE_ORDER:
+            out("  " + format_row(base, spm.NETGEAR_ROWS[base]))
+        out("...waiting for the SPM-write-done interrupt or a short timeout after each")
+        out("block, verifying all three by re-reading, then triggering sensor")
+        out("compensation. Pass --yes to actually do it. Nothing was written.")
         return 0
 
     spm.recover(fd)
@@ -230,38 +246,59 @@ def cmd_capmode(fd, yes):
     out("before: block1 = " + " ".join("%02x" % b for b in before))
     out("before layout: %s" % spm.layout_of(before))
 
-    result, after = spm.apply_capmode(fd)
+    # note=out: the per-block SPM-write-done and compensation-flag outcomes
+    # (otherwise discarded) land in this report, not just the return value.
+    result, rows = spm.apply_capsense(fd, note=out)
     out("result: %s" % result)
-    out("block1 (after) = " + " ".join("%02x" % b for b in after))
-    out("layout (after): %s" % spm.layout_of(after))
-
     if result == "unexpected":
+        out("block1 = " + " ".join("%02x" % b for b in rows))
+    else:
+        for base, row in zip((0x08, 0x10, 0x18), rows):
+            out(format_row(base, row))
+
+    if result == "already":
+        out("\nThe chip already holds NETGEAR's three rows; nothing was written.")
+    elif result == "applied":
+        out("\nAll three rows written and verified; compensation triggered.")
+    elif result == "capmode-only":
+        out("\nBlock 1 already decodes as netgear (CapMode matches), but blocks 2/3 do")
+        out("not match NETGEAR's rows exactly -- some other write left a hybrid state.")
+        out("Nothing was written; this tool never 'tops up' a partial match. Rows above")
+        out("are exactly what was read. The daemon picks the full-ring layout off CapMode")
+        out("alone, so this is not urgent.")
+    elif result == "unexpected":
         out("\nRefusing to write: the sentinel read didn't decode as either the factory")
         out("QSM layout or the target netgear layout, so this isn't a chip state this")
         out("tool knows how to write over safely. Nothing was written. The eight bytes")
-        out("above are exactly what was read.")
-        return 1
-
-    if result == "verify-failed":
-        out("\nWARNING: verify failed -- the chip was NOT confirmed to have the new")
-        out("CapMode written. Staying on whatever layout after-bytes show above.")
+        out("above are exactly block 1 as read.")
+    elif result == "verify-failed":
+        out("\nWARNING: verify failed -- the chip was NOT confirmed to hold all three")
+        out("NETGEAR rows after the write. Staying on whatever the rows above show.")
         out("This tool does NOT retry and does NOT reset the chip -- see")
         out("rnpanel/sx8635_spm.py's module docstring for why.")
     elif result == "write-error":
-        out("\nWARNING: the block write raised an I/O error. block1 above is a fresh")
-        out("re-read taken after the error, not a retried write -- it may or may not")
-        out("reflect the intended change. This tool does NOT retry.")
+        out("\nWARNING: one of the block writes raised an I/O error, and the run")
+        out("stopped there -- no further blocks were attempted. Rows above are a fresh")
+        out("re-read taken after the error, not a retried write. This tool does NOT retry.")
 
-    out("\n=== full SPM dump after capmode ===")
+    # Full read-only dump on every outcome, including "unexpected" -- that
+    # is the one case where we most want the whole chip in the report.
+    out("\n=== full SPM dump after capsense ===")
     data = read_all_spm(fd)
     print_spm_dump(data)
     print_spmstat(fd)
 
+    ok = result in ("applied", "already", "capmode-only")
     out("\nNext steps:")
-    out("  - run tools/sx8635-watch.py --tap to confirm the new layout responds")
-    out("  - SPM is volatile: after a cold power cycle, re-run 'capmode --yes' again --")
-    out("    the daemon does not yet re-apply this itself.")
-    return 0 if result == "applied" else 1
+    if ok:
+        out("  - run tools/sx8635-watch.py --tap to confirm the new layout responds")
+        out("  - SPM is volatile: after a cold power cycle, re-run 'capsense --yes' again --")
+        out("    the daemon does not yet re-apply this itself.")
+    else:
+        out("  - post this report to issue #2 before re-running or power-cycling")
+        out("  - nothing was retried; the chip is left in whatever state the rows above show")
+        out("  - if a later 'dump' shows the SPM window open, run: sx8635-spm.py close")
+    return 0 if ok else 1
 
 
 def cmd_close(fd):
@@ -272,7 +309,7 @@ def cmd_close(fd):
 
 
 COMMANDS = {"dump": lambda fd, yes: cmd_dump(fd),
-            "capmode": lambda fd, yes: cmd_capmode(fd, yes),
+            "capsense": lambda fd, yes: cmd_capsense(fd, yes),
             "close": lambda fd, yes: cmd_close(fd)}
 
 
@@ -287,7 +324,7 @@ def main():
     positional = [a for a in args if not a.startswith("--")]
 
     if len(positional) != 1 or positional[0] not in COMMANDS:
-        print("usage: sx8635-spm.py {dump|capmode|close} [--yes] [--force]")
+        print("usage: sx8635-spm.py {dump|capsense|close} [--yes] [--force]")
         return 1
     cmd = positional[0]
 
@@ -313,6 +350,16 @@ def main():
             out("SPM window: closed (recover)")
         except OSError as e2:
             out("SPM window: could not confirm closed (%s) -- run: sx8635-spm.py close" % e2)
+        # Best-effort post-state so the report is useful even when the
+        # command itself raised (e.g. apply_capsense's read-back RuntimeError,
+        # or a NAK inside a verify read) -- read-only, never masks the error.
+        try:
+            out("\n=== best-effort SPM dump after error ===")
+            data = read_all_spm(fd)
+            print_spm_dump(data)
+            print_spmstat(fd)
+        except OSError as e3:
+            out("(could not read a post-error dump: %s)" % e3)
         if not isinstance(e, (KeyboardInterrupt, SystemExit)):
             traceback.print_exc()
         rc = 1
