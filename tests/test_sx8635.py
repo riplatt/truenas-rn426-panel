@@ -7,7 +7,11 @@ sys.path.insert(0, os.path.dirname(_HERE))
 sys.path.insert(0, _HERE)
 
 import rnpanel.sx8635 as sx8635
-from rnpanel.sx8635 import Sx8635Buttons, _wheel_delta, _wheel_emit, _rising_actions
+from rnpanel.sx8635 import (
+    Sx8635Buttons, _wheel_delta, _wheel_emit, _rising_actions,
+    nearest_centre, TAP_ACTIONS,
+)
+from rnpanel.models import MODELS
 from fakes import SX8635_SPEC, _sx8635
 
 
@@ -394,6 +398,164 @@ class TestSx8635NoWritePath(unittest.TestCase):
         self.assertNotIn("pwrite", src)
         self.assertNotIn("_smbus_ioctl(0", src)
         self.assertEqual(src.count("fcntl.ioctl(self.fd, I2C_SMBUS"), 1)
+
+
+class TestNearestCentre(unittest.TestCase):
+    """The netgear layout's compass, wrap-aware, R=80. Ties (exact boundary
+    between two centres) go to the LOWER centre value -- see nearest_centre's
+    docstring and .claude/advice/rn316-postwrite-review.md section A (the
+    stock sx8635.ko driver's four [start,end) bins)."""
+    COMPASS = MODELS["rn316"]["sx8635"]["layouts"]["netgear"]["compass"]
+    R = MODELS["rn316"]["sx8635"]["layouts"]["netgear"]["wheel_range"]
+
+    def test_empty_compass_returns_none(self):
+        self.assertIsNone(nearest_centre(10, [], self.R))
+
+    def test_exact_centres(self):
+        self.assertEqual(nearest_centre(10, self.COMPASS, self.R), "DOWN")
+        self.assertEqual(nearest_centre(30, self.COMPASS, self.R), "RIGHT")
+        self.assertEqual(nearest_centre(50, self.COMPASS, self.R), "UP")
+        self.assertEqual(nearest_centre(70, self.COMPASS, self.R), "LEFT")
+
+    def test_boundary_20_ties_down_and_right_goes_to_lower_centre(self):
+        # 20 is exactly 10 ticks from both DOWN(10) and RIGHT(30) -- the
+        # lower centre (10, DOWN) wins.
+        self.assertEqual(nearest_centre(20, self.COMPASS, self.R), "DOWN")
+
+    def test_boundary_0_ties_left_wrap_and_down_goes_to_lower_centre(self):
+        # 0 is exactly 10 ticks from LEFT(70, via the wrap) and DOWN(10) --
+        # the lower centre VALUE wins (10, DOWN), not the wrap-nearer one.
+        self.assertEqual(nearest_centre(0, self.COMPASS, self.R), "DOWN")
+
+
+class TestSx8635NetgearTraceReplay(unittest.TestCase):
+    """Replay the tester's real post-write hardware trace (see
+    .claude/advice/rn316-postwrite-review.md section D) through the actual
+    events() state machine on the netgear layout (R=80, detent=10), the same
+    way TestSx8635TraceReplay above does for the qsm layout."""
+
+    def _replay(self, positions):
+        btn = _sx8635(layout="netgear")
+        next_count = prev_count = 0
+        t = 0.0
+        last_pos = positions[0]
+        for pos in positions:
+            t += 0.005
+            btn.queue = [0x08, 0x10, 0x00, pos]   # a "real" chip wheel event
+            ev = btn.events(t)
+            next_count += ev.count("NEXT"); prev_count += ev.count("PREV")
+            if pos < btn.wheel_range:
+                last_pos = pos
+            t += 0.005
+            # daemon's own zero-IrqSrc sub-poll landing between real events
+            # while the wheel is latched touched -- must be a no-op.
+            btn.queue = [0x00, 0x10, 0x00, last_pos]
+            ev = btn.events(t)
+            next_count += ev.count("NEXT"); prev_count += ev.count("PREV")
+        t += 0.005
+        btn.queue = [0x08, 0x00]   # release: wheel-touched bit clears
+        actions = btn.events(t)
+        self.assertFalse(btn.wheel_touched)
+        return next_count, prev_count, actions
+
+    def test_cw_lap_emits_nine_next_no_prev_no_tap(self):
+        # Tester's real CW lap: 50,40,30,20,19,20,13,10,5,0,74,69,70,60,50,40.
+        # Hand-derived ticks (wrap-aware, R=80, half=40):
+        #   50->40 -10, 40->30 -10, 30->20 -10, 20->19 -1, 19->20 +1,
+        #   20->13 -7, 13->10 -3, 10->5 -5, 5->0 -5, 0->74 -6, 74->69 -5,
+        #   69->70 +1, 70->60 -10, 60->50 -10, 50->40 -10
+        #   running total = -90 = 9 detents of 10, remainder 0 -- 9 NEXT,
+        #   0 PREV (simulating _wheel_emit incrementally, no sign reversal
+        #   ever crosses zero far enough to emit a spurious PREV).
+        positions = [50, 40, 30, 20, 19, 20, 13, 10, 5, 0, 74, 69, 70, 60, 50, 40]
+        next_count, prev_count, actions = self._replay(positions)
+        self.assertEqual(next_count, 9)
+        self.assertEqual(prev_count, 0)
+        # A whole lap scrolled -- release must not also fire a compass tap.
+        self.assertNotIn("PREV", actions)
+        self.assertNotIn("NEXT", actions)
+        for name in ("UP", "DOWN", "LEFT", "RIGHT"):
+            self.assertNotIn(name, actions)
+
+    def test_ccw_lap_emits_nine_prev_no_next_no_tap(self):
+        # The exact reverse of the CW lap -- every per-step delta negates,
+        # so the running total is +90: 9 PREV, 0 NEXT.
+        positions = list(reversed([50, 40, 30, 20, 19, 20, 13, 10, 5, 0, 74, 69, 70, 60, 50, 40]))
+        next_count, prev_count, actions = self._replay(positions)
+        self.assertEqual(next_count, 0)
+        self.assertEqual(prev_count, 9)
+        self.assertEqual(actions, [])
+
+
+class TestSx8635NetgearTaps(unittest.TestCase):
+    """The tap rule: per touch episode (reg 0x01 bit 4 set..clear), tap iff
+    excursion <= tap_max_excursion, duration <= tap_max_seconds, no rotation
+    bit ever seen, and nothing scrolled -- then nearest_centre(landing),
+    translated through TAP_ACTIONS (UP->PREV, DOWN->NEXT, LEFT/RIGHT stay
+    activity-only)."""
+
+    def _episode(self, positions, times, release_time, cmsb=0x10):
+        btn = _sx8635(layout="netgear")
+        if isinstance(cmsb, int):
+            cmsb = [cmsb] * len(positions)
+        actions = []
+        for pos, t, cm in zip(positions, times, cmsb):
+            btn.queue = [0x08, cm, (pos >> 8) & 0xFF, pos & 0xFF]
+            actions += btn.events(t)
+        btn.queue = [0x08, 0x00]   # release: WHEEL_TOUCHED bit clears
+        actions += btn.events(release_time)
+        return btn, actions
+
+    def test_tap_down_at_10_emits_next(self):
+        _, actions = self._episode([10, 10, 10], [0.05, 0.15, 0.25], 0.3)
+        self.assertEqual(actions, [TAP_ACTIONS["DOWN"]])
+        self.assertEqual(actions, ["NEXT"])
+
+    def test_tap_right_at_30_emits_right(self):
+        _, actions = self._episode([30, 30, 30], [0.05, 0.15, 0.25], 0.3)
+        self.assertEqual(actions, ["RIGHT"])
+
+    def test_tap_up_at_50_emits_prev(self):
+        _, actions = self._episode([50, 50, 50], [0.05, 0.15, 0.25], 0.3)
+        self.assertEqual(actions, [TAP_ACTIONS["UP"]])
+        self.assertEqual(actions, ["PREV"])
+
+    def test_tap_left_at_70_emits_left(self):
+        _, actions = self._episode([70, 70, 70], [0.05, 0.15, 0.25], 0.3)
+        self.assertEqual(actions, ["LEFT"])
+
+    def test_jitter_of_two_ticks_still_taps(self):
+        # Real-hardware jitter (observed <= 2 ticks) must not break a tap.
+        _, actions = self._episode([10, 8, 12, 10], [0.05, 0.12, 0.19, 0.26], 0.3)
+        self.assertEqual(actions, ["NEXT"])
+
+    def test_excursion_five_is_not_a_tap(self):
+        # tap_max_excursion is 4; a 5-tick excursion is over it, and 5 ticks
+        # is also under one detent (10) so no scroll fires either -- nothing
+        # at all should come out of this episode.
+        _, actions = self._episode([10, 15], [0.05, 0.1], 0.15)
+        self.assertEqual(actions, [])
+
+    def test_duration_one_second_is_not_a_tap(self):
+        # tap_max_seconds is 0.8; touch_time is set at the first sample
+        # (0.05), so a release at 1.05 is exactly 1.0s later.
+        _, actions = self._episode([70, 70], [0.05, 0.1], 1.05)
+        self.assertEqual(actions, [])
+
+    def test_rotation_bit_seen_is_not_a_tap(self):
+        # cmsb 0x30 = WHEEL_TOUCHED | the CW rotation bit (0x20), seen on
+        # real hardware during fast turns; even a single sample carrying it
+        # vetoes the tap for the whole episode, even though the finger never
+        # actually moved (same position both samples, no scroll).
+        _, actions = self._episode([50, 50], [0.05, 0.1], 0.15, cmsb=[0x10, 0x30])
+        self.assertEqual(actions, [])
+
+    def test_tap_across_the_wrap_maps_to_nearest_centre(self):
+        # Landing at 79, jitter to 1 (a 2-tick wrap-aware excursion, well
+        # under tap_max_excursion) -- nearest centre to 79 is LEFT(70), not
+        # DOWN(10), even though 1 is numerically close to 10.
+        _, actions = self._episode([79, 1], [0.05, 0.15], 0.2)
+        self.assertEqual(actions, ["LEFT"])
 
 
 if __name__ == "__main__":

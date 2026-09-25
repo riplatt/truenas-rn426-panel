@@ -213,6 +213,33 @@ A few things worth knowing before you touch it:
   what the driver assumes elsewhere -- this is just another way to see
   the same thing on the wire.
 
+- **Two SPM layouts, picked at startup, never written by the daemon.** The
+  reg 0x02 table above and the bit-2..5-as-buttons behaviour are the chip's
+  *factory* CapMode (SPM offsets 0x0A-0x0C = 0xFF 0xF5 0x55, "qsm" here):
+  bits 2-5 are ring segments configured as buttons, so the ring is really
+  two separate things -- a small 6-segment wheel (CAP6-9, plus two
+  unpopulated segments) and four button pads (CAP2-5) that also happen to
+  sit on the ring. That's a PCB artefact, not the intended layout: NETGEAR's
+  own firmware reprograms CapMode (to 0x0F 0xFF 0xF5, "netgear" here) on
+  every boot, which turns the whole ring, CAP2-9, into one 8-segment wheel,
+  positions 0-79 wrapping, clockwise = decreasing position. The one write
+  path for this is `tools/sx8635-spm.py`, a separate, consented tool (see
+  `rnpanel/sx8635_spm.py`'s module docstring) -- the daemon itself only ever
+  *reads* SPM block 1 at start, through that module's `recover()` and
+  `read_block1()`, to find out which of the two CapModes the chip is
+  already running under, and picks its `MODELS["rn316"]["sx8635"]["layouts"]`
+  entry accordingly (`app.py`'s `_choose_sx8635_layout`). Set
+  `RN_SX8635_SPM=0` to skip that read entirely and force the factory
+  behaviour.
+
+  On the netgear layout, a still tap at one of four points around the ring
+  (positions 10, 30, 50, 70 -- the same four compass points, confirmed on
+  real hardware, that the stock NETGEAR UI used as its own DOWN/RIGHT/UP/LEFT
+  bins) turns a page instead of scrolling: DOWN pages forward, UP pages
+  back, LEFT/RIGHT just count as activity. Taps only exist on the netgear
+  layout; the factory layout has no compass points defined; a slide or
+  scroll doesn't count as a tap.
+
 ## Prior art: legacy models already covered elsewhere
 
 Probe reports (issues #5 to #9) and forum links turned up existing projects

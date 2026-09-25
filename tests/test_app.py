@@ -1,3 +1,5 @@
+import contextlib
+import io
 import os
 import sys
 import unittest
@@ -8,6 +10,7 @@ sys.path.insert(0, _HERE)
 
 import rnpanel.app as app
 import rnpanel.sx8635 as sx8635
+import rnpanel.sx8635_spm as sx8635_spm
 from rnpanel.models import MODELS
 from fakes import FakeGpio
 
@@ -92,6 +95,153 @@ class TestApplyActions(unittest.TestCase):
     def test_awake_ok_forces_redraw(self):
         _, last_show, *_ = app._apply_actions(["OK"], idx=0, last_show=5.0, activity=0.0, asleep=False, now=1.0)
         self.assertEqual(last_show, 0)
+
+
+class _FakeSpm(object):
+    """Stands in for rnpanel.sx8635_spm in _choose_sx8635_layout tests:
+    recover()/read_block1() are pure call recorders (no real I/O, no real
+    writes -- fd is never a real file descriptor here), and layout_of is the
+    real, pure classification function (no I/O either), so these tests
+    exercise the actual netgear/qsm/unknown decision, not a reimplementation
+    of it."""
+    layout_of = staticmethod(sx8635_spm.layout_of)
+
+    def __init__(self, block=None, raise_on_read=False):
+        self.block = block
+        self.raise_on_read = raise_on_read
+        self.recover_calls = []
+        self.read_calls = []
+
+    def recover(self, fd):
+        self.recover_calls.append(fd)
+
+    def read_block1(self, fd):
+        self.read_calls.append(fd)
+        if self.raise_on_read:
+            raise OSError("simulated NAK")
+        return self.block
+
+
+NETGEAR_BLOCK = (0x00, 0x04, 0x0F, 0xFF, 0xF5, 0x75, 0x55, 0x55)
+QSM_BLOCK = (0x00, 0x04, 0xFF, 0xF5, 0x55, 0x77, 0x77, 0x77)
+UNKNOWN_BLOCK = (0x00, 0x04, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66)
+
+
+class TestChooseSx8635Layout(unittest.TestCase):
+    """_choose_sx8635_layout picks netgear/qsm from a (faked) SPM block 1
+    read, forces qsm on any failure or on RN_SX8635_SPM=0, and logs exactly
+    one stderr line every time -- see app.py's docstring and
+    .claude/advice/rn316-postwrite-review.md section D ("Gating")."""
+
+    def setUp(self):
+        self._old_env = os.environ.get("RN_SX8635_SPM")
+
+    def tearDown(self):
+        if self._old_env is None:
+            os.environ.pop("RN_SX8635_SPM", None)
+        else:
+            os.environ["RN_SX8635_SPM"] = self._old_env
+
+    def _run(self, spm, env=None):
+        if env is None:
+            os.environ.pop("RN_SX8635_SPM", None)
+        else:
+            os.environ["RN_SX8635_SPM"] = env
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            name = app._choose_sx8635_layout(
+                0x2b, spm=spm, open_fd=lambda addr: 999, close_fd=lambda fd: None)
+        return name, buf.getvalue()
+
+    def test_netgear_block_selects_netgear(self):
+        spm = _FakeSpm(NETGEAR_BLOCK)
+        name, out = self._run(spm)
+        self.assertEqual(name, "netgear")
+        self.assertEqual(len(out.rstrip("\n").split("\n")), 1)
+        self.assertIn("netgear", out)
+        self.assertEqual(spm.recover_calls, [999])
+        self.assertEqual(spm.read_calls, [999])
+
+    def test_qsm_block_selects_qsm(self):
+        spm = _FakeSpm(QSM_BLOCK)
+        name, out = self._run(spm)
+        self.assertEqual(name, "qsm")
+        self.assertEqual(len(out.rstrip("\n").split("\n")), 1)
+        self.assertNotIn("WARN", out)
+
+    def test_unknown_block_selects_qsm_with_warn(self):
+        spm = _FakeSpm(UNKNOWN_BLOCK)
+        name, out = self._run(spm)
+        self.assertEqual(name, "qsm")
+        self.assertEqual(len(out.rstrip("\n").split("\n")), 1)
+        self.assertIn("WARN", out)
+
+    def test_oserror_on_read_selects_qsm(self):
+        spm = _FakeSpm(raise_on_read=True)
+        name, out = self._run(spm)
+        self.assertEqual(name, "qsm")
+        self.assertEqual(len(out.rstrip("\n").split("\n")), 1)
+        self.assertEqual(spm.recover_calls, [999])
+
+    def test_env_zero_forces_qsm_without_opening_device(self):
+        spm = _FakeSpm(NETGEAR_BLOCK)
+        name, out = self._run(spm, env="0")
+        self.assertEqual(name, "qsm")
+        self.assertEqual(spm.recover_calls, [])   # no window opened at all
+        self.assertEqual(spm.read_calls, [])
+        self.assertEqual(len(out.rstrip("\n").split("\n")), 1)
+
+
+class TestBuildButtonsSx8635Layout(unittest.TestCase):
+    """_build_buttons merges the chosen layout's dict (from
+    MODELS["rn316"]["sx8635"]["layouts"]) with "addr" and constructs
+    Sx8635Buttons with that -- not the raw sx8635 model spec (which now
+    holds "layouts", not "wheel_range" etc. directly)."""
+
+    class _RecordingSx8635(object):
+        last_spec = None
+
+        def __init__(self, gpio, spec):
+            type(self).last_spec = spec
+
+    def setUp(self):
+        self._orig_classes = dict(app.BUTTON_CLASSES)
+        self._orig_class_attr = app.Sx8635Buttons
+        self._orig_choose = app._choose_sx8635_layout
+        app.BUTTON_CLASSES["sx8635"] = self._RecordingSx8635
+        app.Sx8635Buttons = self._RecordingSx8635
+
+    def tearDown(self):
+        app.BUTTON_CLASSES.clear()
+        app.BUTTON_CLASSES.update(self._orig_classes)
+        app.Sx8635Buttons = self._orig_class_attr
+        app._choose_sx8635_layout = self._orig_choose
+
+    def _gpio(self):
+        gpio = FakeGpio(active=False)
+        gpio.has_int_line = True
+        return gpio
+
+    def test_netgear_layout_dict_passed_through_with_addr(self):
+        app._choose_sx8635_layout = lambda addr: "netgear"
+        app._build_buttons(self._gpio(), "rn316", MODELS["rn316"])
+        spec = self._RecordingSx8635.last_spec
+        expected = MODELS["rn316"]["sx8635"]["layouts"]["netgear"]
+        self.assertEqual(spec["addr"], MODELS["rn316"]["sx8635"]["addr"])
+        self.assertEqual(spec["wheel_range"], expected["wheel_range"])
+        self.assertEqual(spec["detent"], expected["detent"])
+        self.assertEqual(spec["compass"], expected["compass"])
+        self.assertEqual(spec["keys"], expected["keys"])
+
+    def test_qsm_layout_dict_passed_through_with_addr(self):
+        app._choose_sx8635_layout = lambda addr: "qsm"
+        app._build_buttons(self._gpio(), "rn316", MODELS["rn316"])
+        spec = self._RecordingSx8635.last_spec
+        expected = MODELS["rn316"]["sx8635"]["layouts"]["qsm"]
+        self.assertEqual(spec["addr"], MODELS["rn316"]["sx8635"]["addr"])
+        self.assertEqual(spec["wheel_range"], expected["wheel_range"])
+        self.assertEqual(spec["keys"], expected["keys"])
+        self.assertEqual(spec["compass"], [])
 
 
 class TestBuildButtonsDegradeGate(unittest.TestCase):

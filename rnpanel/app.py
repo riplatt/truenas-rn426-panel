@@ -4,6 +4,8 @@ from rnpanel.lcd import LCD
 from rnpanel.msp430 import Msp430Buttons
 from rnpanel.sx8635 import Sx8635Buttons
 from rnpanel.pages import PAGES
+from rnpanel.i2c import fcntl, I2C_SLAVE, find_i801_bus
+from rnpanel import sx8635_spm
 
 def _build(model):
     spec = MODELS[model]
@@ -32,6 +34,65 @@ def _button_class(spec):
     change which button protocol runs."""
     return BUTTON_CLASSES.get(spec.get("buttons"))
 
+def _open_sx8635_fd(addr):
+    """Open /dev/i2c-N and bind it to the SX8635's address -- the same two
+    calls Sx8635Buttons.__init__ makes. Used only for the one-shot SPM
+    sentinel read at startup (_choose_sx8635_layout); the fd is closed again
+    right after, before Sx8635Buttons opens its own for the daemon's whole
+    run."""
+    fd = os.open("/dev/i2c-%d" % find_i801_bus(), os.O_RDWR)
+    fcntl.ioctl(fd, I2C_SLAVE, addr)
+    return fd
+
+
+def _choose_sx8635_layout(addr, spm=sx8635_spm, open_fd=_open_sx8635_fd, close_fd=os.close):
+    """Pick which of MODELS["rn316"]["sx8635"]["layouts"] to run, by reading
+    SPM block 1 through `spm` (rnpanel.sx8635_spm; overridable for tests).
+    Lives here, not in rnpanel/sx8635.py, so that module stays completely
+    write-free and its no-write source scans keep meaning what they say --
+    Sx8635Buttons itself never imports or calls sx8635_spm.
+
+    recover() and read_block1() only ever write the whitelisted SPM
+    window-select registers (0x0D/0x0E) to open and close the read window --
+    that's the one write this daemon ever issues, and it's accepted by
+    design (see sx8635_spm.py's module docstring). Nothing here ever writes
+    the chip's actual configuration.
+
+    RN_SX8635_SPM=0 skips opening the device entirely -- no window read, no
+    write of any kind -- and forces the factory ("qsm") layout. Any OSError
+    (missing bus, NAK'd/absent chip) also forces qsm, as does an
+    unrecognized CapMode (logged as a WARN). Exactly one line is printed to
+    stderr per call (i.e. once per daemon start), always naming the layout
+    chosen. Returns the layout name, "netgear" or "qsm"."""
+    if os.environ.get("RN_SX8635_SPM") == "0":
+        print("SX8635 SPM read skipped (RN_SX8635_SPM=0) -> layout qsm (forced)",
+              file=sys.stderr)
+        return "qsm"
+    try:
+        fd = open_fd(addr)
+        try:
+            spm.recover(fd)
+            block = spm.read_block1(fd)
+        finally:
+            close_fd(fd)
+    except OSError as e:
+        print("SX8635 SPM block 1 read failed (%s) -> layout qsm" % e, file=sys.stderr)
+        return "qsm"
+    hexdump = " ".join("%02x" % b for b in block)
+    name = spm.layout_of(block)
+    if name == "netgear":
+        print("SX8635 SPM block 1 = %s -> layout netgear (read only, nothing written)"
+              % hexdump, file=sys.stderr)
+        return "netgear"
+    if name == "qsm":
+        print("SX8635 SPM block 1 = %s -> layout qsm (read only, nothing written)"
+              % hexdump, file=sys.stderr)
+        return "qsm"
+    print("WARN: SX8635 SPM block 1 = %s -> unrecognized CapMode, forcing layout qsm "
+          "(read only, nothing written)" % hexdump, file=sys.stderr)
+    return "qsm"
+
+
 def _build_buttons(gpio, model, spec):
     """Construct this model's button object, or None if the model has none,
     no interrupt line is known for this gpio, or construction fails.
@@ -50,7 +111,11 @@ def _build_buttons(gpio, model, spec):
         return None
     try:
         if cls is Sx8635Buttons:
-            return cls(gpio, spec["sx8635"])
+            sx = spec["sx8635"]
+            layout_name = _choose_sx8635_layout(sx["addr"])
+            btn_spec = dict(sx["layouts"][layout_name])
+            btn_spec["addr"] = sx["addr"]
+            return cls(gpio, btn_spec)
         return cls(gpio)
     except OSError as e:
         if model == "rn426":

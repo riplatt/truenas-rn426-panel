@@ -48,31 +48,67 @@ MODELS = {
         "buttons": "sx8635",
         "sx8635": {
             "addr": 0x2b,
-            "wheel_range": 0x1f,   # observed raw position range per full turn (one outlier
-                                   # at 0x3b seen at a wrap -- Sx8635Buttons ignores pos >= this)
-            "detent": 4,
-            # reg 0x02 bit-mask -> action, confirmed by a real-hardware
-            # mapping run (see docs/porting.md for the full table). This is
-            # an ORDERED LIST of (mask, action) pairs, not a dict, checked
-            # in order -- first whole-mask match wins, so the check order is
-            # explicit and self-describing rather than relying on dict
-            # iteration order. UP and LEFT have no button bits at all on
-            # this board: they show up purely as ring positions (~0x09 for
-            # UP, ~0x1e for LEFT), so "page back" happens by turning the
-            # ring counter-clockwise, not by pressing a button.
-            "keys": [
-                (0x02, "OK"),      # bit 1: centre OK pad -> refresh
-                # bits 2|3 are not a DOWN pad: under the chip's factory layout
-                # CAP2/CAP3 are ring segments configured as buttons, so a
-                # slide through the bottom of the ring lights this mask too.
-                # As NEXT it fired mid-scroll in either direction; "DOWN" is
-                # activity-only, so only the wheel turns pages here.
-                (0x0c, "DOWN"),
-                (0x30, "RIGHT"),   # bits 4|5: RIGHT pad -> activity-only, like the RN426's LEFT/RIGHT
-                                   # (run()/_apply_actions already treats an unrecognized
-                                   # action as activity-only: resets idle, wakes if asleep,
-                                   # never moves a page)
-            ],
+            # Two SPM CapMode configurations this chip can be running under,
+            # picked at startup by reading SPM block 1 (see app.py's
+            # _choose_sx8635_layout / _build_buttons) -- never written by
+            # this daemon; see rnpanel/sx8635_spm.py for the one write path
+            # (a separate, consented tool) and
+            # .claude/advice/rn316-postwrite-review.md section D for the
+            # full derivation of both rows below.
+            "layouts": {
+                "netgear": {
+                    # NETGEAR's own CapMode (0x0F 0xFF 0xF5): the whole ring,
+                    # CAP2-9, is one 8-segment wheel. Confirmed on real
+                    # hardware once a tester's chip carried this CapMode.
+                    "wheel_range": 80,       # 8 sensors * 10 ticks/sensor; observed max 74, wraps 0<->74
+                    "detent": 10,            # one electrode's worth of ticks -- 8 NEXT/PREV per lap
+                    "tap_max_excursion": 4,  # ticks from landing, wrap-aware; observed tap jitter <= 2
+                    "tap_max_seconds": 0.8,  # observed taps ran 0.14-0.33s
+                    "keys": [
+                        (0x02, "OK"),   # bit 1: centre OK pad -> refresh (unchanged from qsm)
+                    ],
+                    # Nearest-centre on these four points is EXACTLY the
+                    # stock sx8635.ko driver's four sectionSize-20 bins
+                    # (keycodes DOWN/FORWARD/UP/BACK on an 80-tick ring) --
+                    # not a guess, three independent lines of evidence agree
+                    # (see the advisor note). Centres observed on real
+                    # hardware 2026-09-24 (issue #2, tester's OTHER phase:
+                    # four still taps landed at exactly 10/30/50/70).
+                    "compass": [(10, "DOWN"), (30, "RIGHT"), (50, "UP"), (70, "LEFT")],
+                },
+                "qsm": {
+                    # The chip's factory CapMode (0xFF 0xF5 0x55): today's
+                    # values, verbatim, unchanged by this change. CAP0-5 are
+                    # buttons, CAP6-11 a separate, smaller wheel.
+                    "wheel_range": 0x1f,   # observed raw position range per full turn (one outlier
+                                           # at 0x3b seen at a wrap -- Sx8635Buttons ignores pos >= this)
+                    "detent": 4,
+                    # reg 0x02 bit-mask -> action, confirmed by a real-hardware
+                    # mapping run (see docs/porting.md for the full table). This is
+                    # an ORDERED LIST of (mask, action) pairs, not a dict, checked
+                    # in order -- first whole-mask match wins, so the check order is
+                    # explicit and self-describing rather than relying on dict
+                    # iteration order. UP and LEFT have no button bits at all on
+                    # this board: they show up purely as ring positions (~0x09 for
+                    # UP, ~0x1e for LEFT), so "page back" happens by turning the
+                    # ring counter-clockwise, not by pressing a button.
+                    "keys": [
+                        (0x02, "OK"),      # bit 1: centre OK pad -> refresh
+                        # bits 2|3 are not a DOWN pad: under the chip's factory layout
+                        # CAP2/CAP3 are ring segments configured as buttons, so a
+                        # slide through the bottom of the ring lights this mask too.
+                        # As NEXT it fired mid-scroll in either direction; "DOWN" is
+                        # activity-only, so only the wheel turns pages here.
+                        (0x0c, "DOWN"),
+                        (0x30, "RIGHT"),   # bits 4|5: RIGHT pad -> activity-only, like the RN426's LEFT/RIGHT
+                                           # (run()/_apply_actions already treats an unrecognized
+                                           # action as activity-only: resets idle, wakes if asleep,
+                                           # never moves a page)
+                    ],
+                    "compass": [],   # no taps on the factory layout -- nobody will use it, and a
+                                     # UP-tap near the QSM arc's wrap-side glitch isn't worth adding
+                },
+            },
         },
     },
 }

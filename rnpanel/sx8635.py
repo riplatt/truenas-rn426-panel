@@ -25,6 +25,37 @@ def _wheel_emit(acc, detent):
         acc -= detent
     return events, acc
 
+def nearest_centre(pos, compass, wheel_range):
+    """Wrap-aware nearest-centre lookup on a `wheel_range`-position ring.
+    `compass` is an ORDERED LIST of (centre, action) pairs (see MODELS'
+    "compass"). Returns the action name of the closest centre, or None if
+    `compass` is empty (the qsm layout: no taps at all).
+
+    Ties (pos exactly equidistant between two centres, e.g. 20 between 10
+    and 30) go to the LOWER centre value -- this matches the stock
+    sx8635.ko driver's four [start,end) bins, which is what NETGEAR's own
+    UI did with these same centres (see
+    .claude/advice/rn316-postwrite-review.md section A). Scanning centres
+    in ascending order and only replacing the best match on a STRICTLY
+    smaller distance gives that for free: the lower centre is seen first
+    and a tie never displaces it.
+    """
+    best_action, best_dist = None, None
+    for centre, action in sorted(compass, key=lambda ca: ca[0]):
+        dist = abs(_wheel_delta(pos, centre, wheel_range))
+        if best_dist is None or dist < best_dist:
+            best_dist, best_action = dist, action
+    return best_action
+
+# Tap actions map through the same action names run()/_apply_actions
+# already understands (see rnpanel/app.py): NEXT/PREV move a page, anything
+# else is activity-only. A DOWN tap must turn the page forward and an UP
+# tap back, matching the RN426's own DOWN/UP-as-page-move convention, so
+# they're translated to NEXT/PREV here; LEFT/RIGHT keep their own names and
+# stay activity-only, exactly like the qsm layout's (0x0c,"DOWN") key stays
+# activity-only today. This dict is the one place that translation lives.
+TAP_ACTIONS = {"UP": "PREV", "DOWN": "NEXT", "LEFT": "LEFT", "RIGHT": "RIGHT"}
+
 # reg 0x02 bit 0: set on almost any touch (pad or ring alike) -- never a
 # button by itself. Always masked out before any rising-edge check below.
 COMMON_TOUCH_BIT = 0x01
@@ -63,14 +94,30 @@ def _rising_actions(bitmap, prev_bitmap, keys):
 
 class Sx8635Buttons:
     """RN316 front-board Semtech SX8635 capacitive touch-wheel controller,
-    i801 SMBus address 0x2b. STRICTLY READ-ONLY: the chip keeps its
-    calibration in volatile SPM (reloaded from NVM/QSM at power-up); on the
-    one RN316 tested SpmStat NvmValid=0 (factory QSM defaults) yet buttons
-    AND the wheel both work read-only, so this class contains NO write
-    helper at all -- there is no SPM load and no NVM write path to
-    accidentally trigger. NETGEAR's own NVM burn sequence is 0xAC/0xAD
-    (unlock key pair) then 0xA5/0x5A pulsed into 0x0E, and its soft reset
-    is 0xB1; this driver writes none of that, ever.
+    i801 SMBus address 0x2b. This class's own event path is STRICTLY
+    READ-ONLY -- it contains no write helper at all, so there is no SPM
+    load and no NVM write path to accidentally trigger here. The one writer
+    for this chip anywhere in the codebase is rnpanel/sx8635_spm.py, used at
+    daemon startup (from rnpanel/app.py, not from here) only to read SPM
+    block 1 through its read-only recover()/read_block1() functions and
+    decide which layout below to construct this class with -- see
+    app._build_buttons and .claude/advice/rn316-postwrite-review.md section
+    D. NETGEAR's own NVM burn sequence is 0xAC/0xAD (unlock key pair) then
+    0xA5/0x5A pulsed into 0x0E, and its soft reset is 0xB1; this class
+    writes none of that, ever, and never imports sx8635_spm itself.
+
+    The chip runs one of two layouts (MODELS["rn316"]["sx8635"]["layouts"]),
+    picked by app.py before construction and passed in as `spec`:
+      - "qsm": the chip's factory config -- CAP0-5 report as buttons,
+        CAP6-11 as a separate 6-segment wheel. No taps (`compass` is
+        empty); DOWN/RIGHT are button bits, wheel scroll is the only way to
+        page, and UP/LEFT don't exist on this layout at all.
+      - "netgear": SPM block 1's CapMode has been reprogrammed (by
+        tools/sx8635-spm.py, or it survived a warm reboot) so CAP2-9 are
+        one 8-segment wheel, positions 0..79 wrapping, CW decreasing.
+        Scrolling works around the whole ring, and a still tap at one of
+        the four compass points (10/30/50/70) pages instead of scrolling
+        -- see _read_wheel's docstring for the exact tap rule.
 
     Never run this alongside tools/sx8635-watch.py: both read IrqSrc
     (reg 0x00), which clears on read, so two readers steal each other's
@@ -82,13 +129,19 @@ class Sx8635Buttons:
     (reg0x03<<8)|reg0x04, reg 0x01 bit 0x10 = wheel currently touched).
     The reg 0x02 bit->pad mapping is now confirmed by a real-hardware
     mapping run: bit 0 = common "something touched" bit (never a button by
-    itself), bit 1 = OK, bits 2|3 = DOWN, bits 4|5 = RIGHT. See
-    docs/porting.md for the full table and MODELS["rn316"]["sx8635"]["keys"]
-    for the mapping this class actually uses.
+    itself), bit 1 = OK, bits 2|3 = DOWN, bits 4|5 = RIGHT (qsm layout only
+    -- see docs/porting.md for the full table and
+    MODELS["rn316"]["sx8635"]["layouts"]["qsm"]["keys"] for the mapping this
+    class actually uses there; the netgear layout's own "keys" only has OK).
     """
     REG_IRQSRC, REG_CAPSTAT_MSB, REG_CAPSTAT_LSB = 0x00, 0x01, 0x02
     REG_POS_MSB, REG_POS_LSB = 0x03, 0x04
     WHEEL_TOUCHED = 0x10   # reg 0x01 bit 4
+    WHEEL_ROTATING = 0x60  # reg 0x01 bits 5|6: chip's own "fast enough to be
+                            # a rotation, not a tap" veto (0x30 seen CW, 0x50
+                            # CCW on real hardware); used only to veto a tap,
+                            # never as the scroll signal itself (_wheel_emit
+                            # already derives scrolling from position deltas)
     IRQ_BUTTONS, IRQ_WHEEL = 0x04, 0x08   # reg 0x00 bits 2, 3
     SAFETY_INTERVAL = 1.0                 # seconds; read even with no NIRQ/no touch
     WHEEL_POLL_HZ_INTERVAL = 1.0 / 50     # poll >= 50 Hz while the wheel is touched
@@ -99,6 +152,9 @@ class Sx8635Buttons:
         self.wheel_range = spec["wheel_range"]
         self.detent = spec["detent"]
         self.keys = spec["keys"]
+        self.compass = spec.get("compass", [])
+        self.tap_max_excursion = spec.get("tap_max_excursion", 0)
+        self.tap_max_seconds = spec.get("tap_max_seconds", 0)
         self.fd = os.open("/dev/i2c-%d" % find_i801_bus(), os.O_RDWR)
         fcntl.ioctl(self.fd, I2C_SLAVE, self.addr)
         self.prev_bitmap = 0
@@ -106,6 +162,14 @@ class Sx8635Buttons:
         self.wheel_prev_pos = None
         self.wheel_acc = 0
         self.wheel_stale_since = None
+        # Tap-episode tracking (see _read_wheel): landing is the first valid
+        # position seen after a touch starts, and everything else measures
+        # against it for the life of that one touch.
+        self.wheel_landing = None
+        self.wheel_touch_time = 0.0
+        self.wheel_excursion = 0
+        self.wheel_rotated = False
+        self.wheel_scrolled = False
         self.last_read = 0.0
         # First read: confirm the chip actually answers (raises OSError on
         # NAK/missing bus, which _build_buttons treats as "degrade, don't
@@ -150,7 +214,7 @@ class Sx8635Buttons:
             irq = self._read(self.REG_IRQSRC)
             actions = []
             if (irq & self.IRQ_WHEEL) or self.wheel_touched:
-                actions += self._read_wheel()
+                actions += self._read_wheel(now)
             if irq & self.IRQ_BUTTONS:
                 actions += self._read_buttons()
             if irq:
@@ -165,8 +229,14 @@ class Sx8635Buttons:
                 if self.wheel_stale_since is None:
                     self.wheel_stale_since = now
                 elif now - self.wheel_stale_since >= 5.0:
+                    # Drop the latch without going through _read_wheel's own
+                    # release/tap check below -- a stuck-touched read for a
+                    # full 5s means something is wrong (a missed release, a
+                    # wedged chip), not a clean lift, so this never emits a
+                    # tap.
                     self.wheel_touched = False
                     self.wheel_prev_pos = None
+                    self.wheel_landing = None
                     self.wheel_acc = 0
                     self.wheel_stale_since = None
             return actions
@@ -183,27 +253,70 @@ class Sx8635Buttons:
         self.prev_bitmap = bitmap
         return rising
 
-    def _read_wheel(self):
+    def _read_wheel(self, now):
+        """Read the wheel and, live, emit NEXT/PREV as detents accumulate
+        (unchanged from before). On release, decide whether the whole touch
+        episode (reg 0x01 bit 4 set .. clear) was a tap:
+
+        landing = the first valid position seen after touch starts; from
+        then on, every sample updates `excursion` to the largest wrap-aware
+        |offset from landing| seen, ORs `rotated` in from the chip's own
+        rotation bits (reg 0x01 & WHEEL_ROTATING), and sets `scrolled` once
+        any NEXT/PREV has actually been emitted this episode. On release
+        it's a tap iff there's a compass to tap (netgear only), excursion
+        stayed within tap_max_excursion, the whole episode took no longer
+        than tap_max_seconds, no rotation bit was ever seen, and nothing
+        scrolled -- then nearest_centre(landing) fires once, translated
+        through TAP_ACTIONS. Otherwise nothing.
+        """
         cap_msb = self._read(self.REG_CAPSTAT_MSB)
         touched = bool(cap_msb & self.WHEEL_TOUCHED)
         actions = []
         if touched:
+            starting = not self.wheel_touched or self.wheel_prev_pos is None
+            if starting:
+                # Fresh touch episode: reset the tap-tracking state before
+                # this sample's own position/rotation bits are folded in
+                # below, so a rotation bit on the very first sample still
+                # counts (it belongs to this episode, not a stale one).
+                self.wheel_touch_time = now
+                self.wheel_excursion = 0
+                self.wheel_rotated = False
+                self.wheel_scrolled = False
+            if cap_msb & self.WHEEL_ROTATING:
+                self.wheel_rotated = True
             msb = self._read(self.REG_POS_MSB)
             lsb = self._read(self.REG_POS_LSB)
             pos = (msb << 8) | lsb
             if pos >= self.wheel_range:
-                pass   # glitch position (observed 0x3b at a wrap) -- ignore, don't update prev
-            elif not self.wheel_touched or self.wheel_prev_pos is None:
-                self.wheel_prev_pos = pos   # first valid position after a touch starts: just record it
+                pass   # glitch position (observed 0x3b at a wrap) -- ignore, don't update prev/landing
+            elif starting:
+                self.wheel_prev_pos = pos   # first valid position after a touch starts
+                self.wheel_landing = pos    # ... and the tap-landing point for this episode
             else:
                 delta = _wheel_delta(pos, self.wheel_prev_pos, self.wheel_range)
                 self.wheel_prev_pos = pos
                 self.wheel_acc += delta
                 events, self.wheel_acc = _wheel_emit(self.wheel_acc, self.detent)
+                if events:
+                    self.wheel_scrolled = True
                 actions += events
+                if self.wheel_landing is not None:
+                    offset = abs(_wheel_delta(pos, self.wheel_landing, self.wheel_range))
+                    self.wheel_excursion = max(self.wheel_excursion, offset)
             self.wheel_touched = True
         else:
+            if self.wheel_touched and self.compass and self.wheel_landing is not None:
+                tap = (self.wheel_excursion <= self.tap_max_excursion
+                       and (now - self.wheel_touch_time) <= self.tap_max_seconds
+                       and not self.wheel_rotated
+                       and not self.wheel_scrolled)
+                if tap:
+                    action = nearest_centre(self.wheel_landing, self.compass, self.wheel_range)
+                    if action is not None:
+                        actions.append(TAP_ACTIONS.get(action, action))
             self.wheel_touched = False
             self.wheel_prev_pos = None
+            self.wheel_landing = None
             self.wheel_acc = 0
         return actions

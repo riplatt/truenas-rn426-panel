@@ -74,7 +74,11 @@ class FakeMsp430Buttons(Msp430Buttons):
         return self.value
 
 
-SX8635_SPEC = MODELS["rn316"]["sx8635"]
+SX8635_ADDR = MODELS["rn316"]["sx8635"]["addr"]
+SX8635_LAYOUTS = MODELS["rn316"]["sx8635"]["layouts"]
+# "Today's spec", i.e. what direct SX8635_SPEC[...] lookups meant before the
+# netgear/qsm split -- the factory (qsm) layout, addr merged in.
+SX8635_SPEC = dict(SX8635_LAYOUTS["qsm"], addr=SX8635_ADDR)
 
 
 class FakeSx8635Buttons(Sx8635Buttons):
@@ -88,11 +92,19 @@ class FakeSx8635Buttons(Sx8635Buttons):
         self.wheel_range = spec["wheel_range"]
         self.detent = spec["detent"]
         self.keys = spec["keys"]
+        self.compass = spec.get("compass", [])
+        self.tap_max_excursion = spec.get("tap_max_excursion", 0)
+        self.tap_max_seconds = spec.get("tap_max_seconds", 0)
         self.prev_bitmap = 0
         self.wheel_touched = False
         self.wheel_prev_pos = None
         self.wheel_acc = 0
         self.wheel_stale_since = None
+        self.wheel_landing = None
+        self.wheel_touch_time = 0.0
+        self.wheel_excursion = 0
+        self.wheel_rotated = False
+        self.wheel_scrolled = False
         self.last_read = 0.0
         self.queue = []
 
@@ -100,7 +112,16 @@ class FakeSx8635Buttons(Sx8635Buttons):
         return self.queue.pop(0)
 
 
-def _sx8635(keys=None, gpio_active=True):
-    spec = dict(SX8635_SPEC)
+def _sx8635(keys=None, gpio_active=True, layout="qsm", compass=None):
+    """Build a FakeSx8635Buttons on `layout` ("qsm" or "netgear"). `keys`
+    defaults to [] (not the layout's real keys) to preserve every existing
+    test's behaviour, which mostly wants the empty-keys "any real touch is
+    one OK" fallback; pass keys=SX8635_LAYOUTS[layout]["keys"] (or
+    SX8635_SPEC["keys"] for qsm) for the real mapping. `compass` overrides
+    the layout's own compass list when given (mainly to force it empty on
+    an otherwise-netgear spec)."""
+    spec = dict(SX8635_LAYOUTS[layout], addr=SX8635_ADDR)
     spec["keys"] = [] if keys is None else keys
+    if compass is not None:
+        spec["compass"] = compass
     return FakeSx8635Buttons(FakeGpio(active=gpio_active), spec)
