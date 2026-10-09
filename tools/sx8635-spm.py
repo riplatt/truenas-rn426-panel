@@ -291,11 +291,13 @@ def cmd_capsense(fd, yes):
     ok = result in ("applied", "already", "capmode-only")
     out("\nNext steps:")
     if ok:
-        out("  - run tools/sx8635-watch.py --tap to confirm the new layout responds")
+        out("  - systemctl start rn426-panel, then just use the ring")
+        out("  - for one journal line per touch, set RN_SX8635_TRACE=1 (docs/porting.md)")
         out("  - SPM is volatile: after a cold power cycle, re-run 'capsense --yes' again --")
         out("    the daemon does not yet re-apply this itself.")
     else:
         out("  - post this report to issue #2 before re-running or power-cycling")
+        out("  - if you have a working i2cset script, paste it into the issue too")
         out("  - nothing was retried; the chip is left in whatever state the rows above show")
         out("  - if a later 'dump' shows the SPM window open, run: sx8635-spm.py close")
     return 0 if ok else 1
@@ -351,7 +353,7 @@ def main():
         except OSError as e2:
             out("SPM window: could not confirm closed (%s) -- run: sx8635-spm.py close" % e2)
         # Best-effort post-state so the report is useful even when the
-        # command itself raised (e.g. apply_capsense's read-back RuntimeError,
+        # command itself raised (e.g. an unsupported adapter RuntimeError,
         # or a NAK inside a verify read) -- read-only, never masks the error.
         try:
             out("\n=== best-effort SPM dump after error ===")

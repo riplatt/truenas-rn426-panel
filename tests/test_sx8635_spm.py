@@ -46,7 +46,8 @@ class FakeTransport(object):
                  block_write_updates=True, supports_block_write=True,
                  read_byte_raises_at=None, write_byte_raises_at=None,
                  block_write_raises_at=None, ignore_spmcfg_writes=False,
-                 signal_write_done=True):
+                 signal_write_done=True, ignore_write_open=False,
+                 irq_read_raises_on=()):
         self.blocks = {0x08: list(block1), 0x10: list(block2), 0x18: list(block3)}
         self.spmcfg = 0
         self.spmbase = 0
@@ -61,6 +62,9 @@ class FakeTransport(object):
         self.block_write_raises_at = block_write_raises_at
         self.ignore_spmcfg_writes = ignore_spmcfg_writes
         self.signal_write_done = signal_write_done
+        self.ignore_write_open = ignore_write_open   # chip drops the window-open write
+        self.irq_read_raises_on = set(irq_read_raises_on)   # 1-based IrqSrc read numbers that NAK
+        self.irq_reads = 0
         self.read_calls = 0
         self.write_calls = 0
         self.block_write_calls = 0
@@ -71,6 +75,8 @@ class FakeTransport(object):
         if self.write_byte_raises_at is not None and self.write_calls == self.write_byte_raises_at:
             raise OSError("simulated i2c NAK on write")
         self.log.append(("wr", reg, val))
+        if reg == spm.REG_SPMCFG and val == spm.SPM_WRITE_OPEN and self.ignore_write_open:
+            return
         if reg == spm.REG_SPMCFG:
             if not self.ignore_spmcfg_writes:
                 self.spmcfg = val
@@ -90,6 +96,10 @@ class FakeTransport(object):
         self.read_calls += 1
         if self.read_byte_raises_at is not None and self.read_calls == self.read_byte_raises_at:
             raise OSError("simulated i2c NAK on read")
+        if reg == spm.REG_IRQSRC and not self.window_open:
+            self.irq_reads += 1
+            if self.irq_reads in self.irq_read_raises_on:
+                raise OSError("simulated i2c NAK on IrqSrc read")
         self.log.append(("rd", reg))
         # The SPM window remaps regs 0x00-0x07 to block data ONLY while open
         # for read at one of the known block bases -- check that first.
@@ -144,7 +154,8 @@ class FakeClock(object):
     advances the fake clock instead of actually blocking, so tests never
     incur a real delay even when a wait loop runs to its full timeout."""
 
-    def __init__(self, step=0.005):
+    def __init__(self, step=0.005, log=None):
+        self.log = log   # the transport's log, so delays are part of the pinned sequence
         self.t = 0.0
         self.step = step
         self.sleep_calls = 0
@@ -155,6 +166,8 @@ class FakeClock(object):
     def sleep(self, secs):
         self.sleep_calls += 1
         self.t += secs
+        if self.log is not None:
+            self.log.append(("sleep", secs))
 
 
 class SpmTransportTestCase(unittest.TestCase):
@@ -179,6 +192,7 @@ class SpmTransportTestCase(unittest.TestCase):
         spm.time = self._real_time
 
     def install(self, transport):
+        self.clock.log = transport.log
         spm._smbus_write_byte = transport.write_byte
         spm._smbus_read_byte = transport.read_byte
         spm._smbus_write_i2c_block = transport.write_i2c_block
@@ -282,16 +296,15 @@ class TestWrBlock(SpmTransportTestCase):
             spm._wr_block(None, 0x08)
         self.assertEqual(t.block_writes(), [])
 
-    def test_refuses_when_readback_wrong(self):
-        # The chip silently ignores the SpmCfg write (stuck at whatever it
-        # was) -- _wr_block must catch this via its own readback, not trust
-        # that the write succeeded just because it didn't raise.
-        t = self.install(FakeTransport(block1=list(QSM_BLOCK1), ignore_spmcfg_writes=True))
-        with self.assertRaises(RuntimeError):
-            spm._wr_block(None, 0x08)
-        self.assertEqual(t.block_writes(), [])
-        # still attempts to close, even though the open didn't verify
-        self.assertEqual(t.spmcfg_writes()[-1], spm.SPM_CLOSED)
+    def test_chip_ignoring_window_open_gets_verify_failed_not_compensation(self):
+        # The chip drops the window-open write, so every burst is discarded.
+        # There is no read-back any more: the post-write verify catches it.
+        t = self.install(FakeTransport(block1=list(QSM_BLOCK1), ignore_write_open=True))
+        result, rows = spm.apply_capsense(None)
+        self.assertEqual(result, "verify-failed")
+        self.assertEqual(len(t.block_writes()), 3)   # all three attempted
+        self.assertEqual(rows, (tuple(QSM_BLOCK1), ZERO_BLOCK, ZERO_BLOCK))
+        self.assertNotIn(("wr", spm.REG_COMPOPMODE, spm.TRIGGER_COMPENSATION), t.log)
 
     def test_accepts_valid_base_self_contained_open_base_close(self):
         for base, row in ((0x08, NETGEAR_ROW_08), (0x10, NETGEAR_ROW_10), (0x18, NETGEAR_ROW_18)):
@@ -301,10 +314,45 @@ class TestWrBlock(SpmTransportTestCase):
             self.assertEqual(t.block_writes()[0][1], 0x00)
             # the payload written equals NETGEAR_ROWS[base] exactly
             self.assertEqual(t.block_writes()[0][2], row)
-            # _wr_block opened for write, set the base, read both back,
-            # wrote, and closed -- entirely on its own.
+            # _wr_block opened for write, set the base, wrote, and closed
+            # -- entirely on its own.
             self.assertEqual(t.spmcfg_writes(), [spm.SPM_WRITE_OPEN, spm.SPM_CLOSED])
             self.assertEqual(t.spmbase_writes(), [base])
+            # Between open and close, exactly two entries touch the chip
+            # (base write, burst) and no read at all: the first hardware run
+            # showed the chip discards the burst otherwise.
+            i_open = t.log.index(("wr", 0x0D, 0x10))
+            i_close = t.log.index(("wr", 0x0D, 0x00))
+            inside = [e for e in t.log[i_open + 1:i_close] if e[0] != "sleep"]
+            self.assertEqual(inside, [("wr", 0x0E, base), ("block", 0x00, NETGEAR_ROWS_LITERAL[base])])
+            self.assertFalse([e for e in t.log if e[0] == "rd"])
+
+    def test_wr_block_waits_after_open_and_after_close(self):
+        # Delays are the stock driver's; "optimising" them away breaks the
+        # write on hardware. Measured on the fake clock.
+        class Timed(FakeTransport):
+            def __init__(self, clock, *a, **kw):
+                FakeTransport.__init__(self, *a, **kw)
+                self.clock = clock
+                self.at = {}
+
+            def write_byte(self, fd, reg, val):
+                FakeTransport.write_byte(self, fd, reg, val)
+                self.at.setdefault((reg, val), []).append(self.clock.t)
+
+            def read_byte(self, fd, reg):
+                self.at.setdefault(("rd", reg), []).append(self.clock.t)
+                return FakeTransport.read_byte(self, fd, reg)
+
+        t = self.install(Timed(self.clock, block1=list(QSM_BLOCK1)))
+        spm._wr_block(None, 0x18)
+        spm._wait_for_spm_write_done(None)
+        t_open = t.at[(0x0D, 0x10)][0]
+        t_base = t.at[(0x0E, 0x18)][0]
+        t_close = t.at[(0x0D, 0x00)][0]
+        t_read = t.at[("rd", 0x00)][0]
+        self.assertGreaterEqual(t_base - t_open, 0.03 - 1e-9)
+        self.assertGreaterEqual(t_read - t_close, 0.05 - 1e-9)
 
     def test_closes_window_even_when_block_write_raises(self):
         t = self.install(FakeTransport(block1=list(QSM_BLOCK1), block_write_raises_at=1))
@@ -530,14 +578,14 @@ class TestApplyCapsense(SpmTransportTestCase):
             [("rd", 0x0D)]                                              # recover()
             + [("wr", 0x0D, 0x18), ("wr", 0x0E, 0x08)]                   # sentinel read_block(0x08) open
             + [("rd", i) for i in range(8)]                              # sentinel data
-            + [("wr", 0x0D, 0x00)]                                       # sentinel close
+            + [("wr", 0x0D, 0x00), ("sleep", 0.03)]                      # sentinel close, quiet
         )
         for base in (0x18, 0x10, 0x08):                                  # write order
             expected += (
-                [("wr", 0x0D, 0x10), ("wr", 0x0E, base),                 # _wr_block open+base
-                 ("rd", 0x0D), ("rd", 0x0E)]                              # _wr_block readback
+                [("wr", 0x0D, 0x10), ("sleep", 0.03),                    # _wr_block open, settle
+                 ("wr", 0x0E, base)]                                      # base, nothing else in the window
                 + [("block", 0x00, NETGEAR_ROWS_LITERAL[base])]          # the write (literal, not spm.NETGEAR_ROWS)
-                + [("wr", 0x0D, 0x00)]                                   # _wr_block close
+                + [("wr", 0x0D, 0x00), ("sleep", 0.05)]                  # _wr_block close, bus quiet
                 + [("rd", 0x00)]                                         # wait for SPM write done
             )
         for base in (0x08, 0x10, 0x18):                                  # verify, address order
@@ -569,6 +617,8 @@ class TestApplyCapsenseNote(SpmTransportTestCase):
         self.assertIn("0x08", notes[2])
         self.assertIn("compensation-done", notes[3])
         self.assertTrue(all("seen" in n and "not seen" not in n for n in notes))
+        self.assertEqual(notes[0], "block 0x18: SPM-write-done seen (1 polls, 0 NAKs)")
+        self.assertEqual(notes[3], "compensation-done seen (1 polls, 0 NAKs)")
 
     def test_note_reports_not_seen_on_write_done_timeout(self):
         # signal_write_done=False only withholds the SPM-write-done flag;
@@ -581,6 +631,23 @@ class TestApplyCapsenseNote(SpmTransportTestCase):
         self.assertEqual(result, "applied")
         self.assertEqual(len(notes), 4)
         self.assertTrue(all("not seen in 300 ms" in n for n in notes[:3]))
+        self.assertEqual(notes[0], "block 0x18: SPM-write-done not seen in 300 ms (60 polls, 0 NAKs)")
+
+    def test_note_counts_naks_on_polls(self):
+        # IrqSrc reads 1 and 2 NAK, the third finds the flag: 3 polls, 2 NAKs.
+        self.install(FakeTransport(block1=QSM_BLOCK1, irq_read_raises_on=(1, 2)))
+        notes = []
+        result, rows = spm.apply_capsense(None, note=notes.append)
+        self.assertEqual(result, "applied")
+        self.assertEqual(notes[0], "block 0x18: SPM-write-done seen (3 polls, 2 NAKs)")
+        self.assertEqual(notes[1], "block 0x10: SPM-write-done seen (1 polls, 0 NAKs)")
+
+    def test_note_counts_naks_when_flag_never_seen(self):
+        self.install(FakeTransport(block1=QSM_BLOCK1, signal_write_done=False,
+                                   irq_read_raises_on=(1, 2, 3)))
+        notes = []
+        spm.apply_capsense(None, note=notes.append)
+        self.assertEqual(notes[0], "block 0x18: SPM-write-done not seen in 300 ms (60 polls, 3 NAKs)")
 
     def test_note_called_on_write_error_too(self):
         # Write order 0x18,0x10,0x08 -- a NAK on the second block write still
@@ -721,6 +788,7 @@ class TestToolCLI(SpmTransportTestCase):
         rc = self.tool.cmd_capsense(None, True)
         self.assertEqual(rc, 0)
         self.assertIn("result: applied", self.tool.OUT_LINES)
+        self.assertNotIn("--tap", " ".join(self.tool.OUT_LINES))
 
     def test_capsense_yes_write_error_exits_one(self):
         t = self.install(FakeTransport(block1=list(QSM_BLOCK1), block_write_raises_at=1))
@@ -761,6 +829,18 @@ class TestToolCLI(SpmTransportTestCase):
         joined = "\n".join(self.tool.OUT_LINES)
         self.assertIn("issue #2", joined)
         self.assertNotIn("--tap to confirm", joined)
+
+    def test_capsense_yes_report_carries_poll_and_nak_counts(self):
+        self.install(FakeTransport(block1=list(QSM_BLOCK1), irq_read_raises_on=(1,)))
+        self.tool.cmd_capsense(None, True)
+        joined = "\n".join(self.tool.OUT_LINES)
+        self.assertIn("block 0x18: SPM-write-done seen (2 polls, 1 NAKs)", joined)
+        self.assertIn("compensation-done seen (1 polls, 0 NAKs)", joined)
+
+    def test_failure_next_steps_ask_for_working_i2cset_script(self):
+        self.install(FakeTransport(block1=QSM_BLOCK1, block_write_updates=False))
+        self.tool.cmd_capsense(None, True)
+        self.assertIn("i2cset script", "\n".join(self.tool.OUT_LINES))
 
     def test_read_all_spm_never_opens_write_direction(self):
         data = [i & 0xFF for i in range(128)]

@@ -27,10 +27,12 @@ What this module CAN write. Exactly two things:
      entirely self-contained: it refuses any base not in WRITE_BASES, takes
      its payload from the constant NETGEAR_ROWS[base] (never from a caller
      argument -- nothing read from the chip is ever fed back into a write),
-     opens the SPM window for write, sets the base itself, reads both
-     registers back to confirm that took effect, and only then issues the
+     opens the SPM window for write, sets the base itself, and issues the
      block write, closing the window again in its own `finally` regardless
-     of outcome.
+     of outcome. It never issues any transaction inside an open write
+     window other than the base write and the burst, because the first
+     hardware run showed the chip discards the burst otherwise (issue #2,
+     2026-10-01); its timing is copied from the stock driver.
 
 What this module can NEVER write, by construction, not by a runtime check:
   - The chip's I2C slave address (SPM offset 0x04, "I2CAddress"), which lives
@@ -40,9 +42,8 @@ What this module can NEVER write, by construction, not by a runtime check:
     caller in this file calls it with anything but a literal 0x08, 0x10 or
     0x18. The one function that builds a write-direction block transfer
     also never trusts a base some earlier call set: it opens the window and
-    writes its own base itself, immediately before writing, and reads both
-    SpmCfg and SpmBaseAddr back to confirm the window is actually open for
-    write at that base before it ever calls the block-write primitive. So no
+    writes its own base itself, from WRITE_BASES, immediately before the
+    burst, in the same function under the same try/finally. So no
     sequence of calls -- including one that first ran _wr_dump()'s read-only
     walk, which does visit base 0x00 (block 0) -- can leave a pending block
     write aimed anywhere but one of the three NETGEAR_ROWS bases.
@@ -116,7 +117,6 @@ SPM_CLOSED = 0x00          # SpmCfg: mode off (window closed)
 SPM_WRITE_OPEN = 0x10      # SpmCfg: mode on, direction write
 SPM_READ_OPEN = 0x18       # SpmCfg: mode on, direction read
 SPM_MODE_MASK = 0x30       # SpmCfg bits 5:4 -- nonzero means the window is open
-SPM_CFG_DIR_MASK = 0x38    # SpmCfg bits 5:3 -- mode + direction, used for _wr_block's readback check
 
 TRIGGER_COMPENSATION = 0x04   # CompOpMode bit 2, write direction: trigger compensation
 
@@ -124,6 +124,13 @@ IRQ_SPMWRITE_BIT = 0x20   # IrqSrc bit 5: SPM write done (reading IrqSrc clears 
 IRQ_COMP_BIT = 0x02       # IrqSrc bit 1: compensation done
 SPM_WRITE_WAIT_TIMEOUT = 0.3   # seconds
 POLL_SLEEP = 0.005             # seconds between IrqSrc polls
+# Timing copied from the stock sx8635.ko driver (update_spm_8block: msleep 30
+# after opening the write window, msleep 50 after closing it). The first
+# hardware run (issue #2, 2026-10-01) showed the chip discards the burst
+# without them, so these are required, not tuning.
+SPM_OPEN_SETTLE = 0.03         # seconds from opening the write window to the base write
+SPM_CLOSE_QUIET = 0.05         # seconds of bus silence after closing, before the first IrqSrc read
+SPM_READ_CLOSE_QUIET = 0.03    # stock retrieve_spm_8block: msleep 30 after a read session closes
 
 # The complete set of single-register writes apply_capsense()'s path may
 # ever issue. _wr() raises for anything outside this frozenset -- see the
@@ -236,10 +243,15 @@ def _wr_block(fd, base):
     WRITE_BASES, takes its 8-byte payload from NETGEAR_ROWS[base] (never
     from a caller-supplied buffer -- there is no way to make this function
     write anything but one of the three frozen rows), opens the SPM window
-    for write, sets the base itself, reads both registers back to confirm
-    that took effect, issues the block write, and closes the window again in
-    its own `finally` -- regardless of outcome. It never trusts a base or
-    direction some other call set earlier.
+    for write, sets the base itself, issues the block write, and closes the
+    window again in its own `finally` -- regardless of outcome. It never
+    trusts a base or direction some other call set earlier.
+
+    It never issues any transaction inside the open write window other than
+    the base write and the burst, because the first hardware run showed the
+    chip discards the burst otherwise (issue #2, 2026-10-01). Sequence and
+    timing are the stock driver's: open, wait SPM_OPEN_SETTLE, base, burst,
+    close. The caller then waits SPM_CLOSE_QUIET before touching the chip.
     """
     if base not in WRITE_BASES:
         raise ValueError(
@@ -250,12 +262,8 @@ def _wr_block(fd, base):
     _require_i2c_block_write(fd)
     _wr(fd, REG_SPMCFG, SPM_WRITE_OPEN)
     try:
+        time.sleep(SPM_OPEN_SETTLE)
         _wr(fd, REG_SPMBASE, base)
-        cfg, rdbase = _rd(fd, REG_SPMCFG), _rd(fd, REG_SPMBASE)
-        if (cfg & SPM_CFG_DIR_MASK) != SPM_WRITE_OPEN or rdbase != base:
-            raise RuntimeError(
-                "SPM window not open for write at base 0x%02x (SpmCfg=0x%02x SpmBaseAddr=0x%02x) "
-                "-- refusing to write" % (base, cfg, rdbase))
         _smbus_write_i2c_block(fd, 0x00, payload)
     finally:
         _wr(fd, REG_SPMCFG, SPM_CLOSED)
@@ -321,21 +329,33 @@ def _poll_irq_bit(fd, bit, timeout):
     is correct here -- each read either finds the bit or consumes a stale
     one. OSError is tolerated on the read (the chip can NAK briefly while
     busy applying a write or compensating) but never suppresses a write
-    error anywhere else. Returns whether the bit was seen; a timeout is not
-    itself a failure -- callers always verify with a real re-read afterward."""
+    error anywhere else. Returns (seen, polls, naks): whether the bit was
+    seen, how many reads were attempted, and how many of them raised OSError
+    (swallowed). A timeout is not itself a failure -- callers always verify
+    with a real re-read afterward."""
     deadline = time.time() + timeout
+    polls = naks = 0
     while time.time() < deadline:
+        polls += 1
         try:
             if _rd(fd, REG_IRQSRC) & bit:
-                return True
+                return True, polls, naks
         except OSError:
-            pass
+            naks += 1
         time.sleep(POLL_SLEEP)
-    return False
+    return False, polls, naks
 
 
 def _wait_for_spm_write_done(fd, timeout=SPM_WRITE_WAIT_TIMEOUT):
+    """Stay off the bus for SPM_CLOSE_QUIET after the window closed (the
+    stock driver's msleep 50), then poll IrqSrc. Returns (seen, polls, naks)."""
+    time.sleep(SPM_CLOSE_QUIET)
     return _poll_irq_bit(fd, IRQ_SPMWRITE_BIT, timeout)
+
+
+def _describe_wait(result):
+    seen, polls, naks = result
+    return "%s (%d polls, %d NAKs)" % ("seen" if seen else "not seen in 300 ms", polls, naks)
 
 
 def _trigger_compensation(fd, timeout=SPM_WRITE_WAIT_TIMEOUT):
@@ -343,7 +363,7 @@ def _trigger_compensation(fd, timeout=SPM_WRITE_WAIT_TIMEOUT):
     compensation, then poll for IrqSrc's compensation-done bit (datasheet
     Table 30's footnote: wait for INTB or 300 ms before any further I2C read
     after an operating-mode-affecting write). Returns whether the flag was
-    seen; either way the caller proceeds -- this is post-write housekeeping,
+    seen, as (seen, polls, naks); either way the caller proceeds -- this is post-write housekeeping,
     not something the capsense write's own success depends on."""
     _wr(fd, REG_COMPOPMODE, TRIGGER_COMPENSATION)
     return _poll_irq_bit(fd, IRQ_COMP_BIT, timeout)
@@ -411,21 +431,22 @@ def apply_capsense(fd, note=None):
     if layout != "qsm":
         return ("unexpected", b1)
 
+    time.sleep(SPM_READ_CLOSE_QUIET)
     for base in _WRITE_ORDER:
         try:
             _wr_block(fd, base)
         except OSError:
-            seen = _wait_for_spm_write_done(fd)
-            note("block 0x%02x: SPM-write-done %s" % (base, "seen" if seen else "not seen in 300 ms"))
+            res = _wait_for_spm_write_done(fd)
+            note("block 0x%02x: SPM-write-done %s" % (base, _describe_wait(res)))
             return ("write-error", _read_rows(fd))
-        seen = _wait_for_spm_write_done(fd)
-        note("block 0x%02x: SPM-write-done %s" % (base, "seen" if seen else "not seen in 300 ms"))
+        res = _wait_for_spm_write_done(fd)
+        note("block 0x%02x: SPM-write-done %s" % (base, _describe_wait(res)))
 
     rows = _read_rows(fd)
     if rows != (NETGEAR_ROWS[0x08], NETGEAR_ROWS[0x10], NETGEAR_ROWS[0x18]):
         return ("verify-failed", rows)
-    comp_seen = _trigger_compensation(fd)
-    note("compensation-done %s" % ("seen" if comp_seen else "not seen in 300 ms"))
+    res = _trigger_compensation(fd)
+    note("compensation-done %s" % _describe_wait(res))
     return ("applied", rows)
 
 
