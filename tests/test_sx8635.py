@@ -1,3 +1,5 @@
+import contextlib
+import io
 import os
 import sys
 import unittest
@@ -556,6 +558,78 @@ class TestSx8635NetgearTaps(unittest.TestCase):
         # DOWN(10), even though 1 is numerically close to 10.
         _, actions = self._episode([79, 1], [0.05, 0.15], 0.2)
         self.assertEqual(actions, ["LEFT"])
+
+
+class TestSx8635Trace(unittest.TestCase):
+    """RN_SX8635_TRACE: one stderr line per touch episode / button, and
+    never any change to what events() returns."""
+
+    def _episode(self, trace, positions, times, release_time, cmsb=0x10):
+        btn = _sx8635(layout="netgear")
+        btn.trace = trace
+        buf = io.StringIO()
+        actions = []
+        with contextlib.redirect_stderr(buf):
+            for pos, t in zip(positions, times):
+                btn.queue = [0x08, cmsb, (pos >> 8) & 0xFF, pos & 0xFF]
+                actions += btn.events(t)
+            btn.queue = [0x08, 0x00]
+            actions += btn.events(release_time)
+        return actions, buf.getvalue()
+
+    def test_tap_up_traced(self):
+        actions, out = self._episode(True, [50, 50, 50], [0.05, 0.15, 0.25], 0.3)
+        self.assertEqual(actions, ["PREV"])
+        self.assertIn("-> tap UP", out)
+        self.assertIn("landing=50 release=50 excursion=0", out)
+        self.assertEqual(len(out.splitlines()), 1)
+
+    def test_scroll_traced(self):
+        actions, out = self._episode(True, [10, 20, 30], [0.05, 0.1, 0.15], 0.2)
+        self.assertTrue(actions)
+        self.assertIn("-> scroll", out)
+        self.assertIn("release=30", out)
+
+    def test_long_still_touch_traced_as_none(self):
+        actions, out = self._episode(True, [70, 70], [0.05, 0.1], 1.05)
+        self.assertEqual(actions, [])
+        self.assertIn("-> none", out)
+
+    def test_ok_press_traced(self):
+        btn = _sx8635(keys=MODELS["rn316"]["sx8635"]["layouts"]["qsm"]["keys"])
+        btn.trace = True
+        btn.queue = [0x04, 0x03]
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            actions = btn.events(0.0)
+        self.assertEqual(actions, ["OK"])
+        self.assertIn("sx8635 button: bitmap=0x03 -> OK", buf.getvalue())
+
+    def test_stale_latch_traced(self):
+        btn = _sx8635(layout="netgear")
+        btn.trace = True
+        btn.wheel_touched = True
+        btn.wheel_stale_since = 0.0
+        btn.queue = [0x00, 0x10, 0, 50]   # irq 0, still touched, pos 50
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            btn.events(5.0)
+        self.assertIn("stale latch dropped after 5s", buf.getvalue())
+
+    def test_trace_off_is_silent_and_identical(self):
+        for pos, times, rel in (([50, 50, 50], [0.05, 0.15, 0.25], 0.3),
+                                ([10, 20, 30], [0.05, 0.1, 0.15], 0.2),
+                                ([70, 70], [0.05, 0.1], 1.05)):
+            off, out = self._episode(False, pos, times, rel)
+            on, _ = self._episode(True, pos, times, rel)
+            self.assertEqual(out, "")
+            self.assertEqual(off, on)
+
+    def test_trace_names_the_compass_point_acted_on(self):
+        for pos, name in ((10, "DOWN"), (30, "RIGHT"), (50, "UP"), (70, "LEFT")):
+            actions, out = self._episode(True, [pos] * 3, [0.05, 0.15, 0.25], 0.3)
+            self.assertEqual(actions, [TAP_ACTIONS[name]])
+            self.assertIn("-> tap %s" % name, out)
 
 
 if __name__ == "__main__":

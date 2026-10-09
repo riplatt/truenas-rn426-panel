@@ -1,4 +1,4 @@
-import os, ctypes
+import os, sys, ctypes
 from rnpanel.i2c import fcntl, I2C_SLAVE, I2C_SMBUS, _smbus_ioctl, find_i801_bus
 
 # --------------------------------------------------------------------------
@@ -145,10 +145,12 @@ class Sx8635Buttons:
     IRQ_BUTTONS, IRQ_WHEEL = 0x04, 0x08   # reg 0x00 bits 2, 3
     SAFETY_INTERVAL = 1.0                 # seconds; read even with no NIRQ/no touch
     WHEEL_POLL_HZ_INTERVAL = 1.0 / 50     # poll >= 50 Hz while the wheel is touched
+    trace = False   # RN_SX8635_TRACE=1: one stderr line per touch/button (no chip access)
 
     def __init__(self, gpio, spec):
         self.gpio = gpio
         self.addr = spec["addr"]
+        self.trace = os.environ.get("RN_SX8635_TRACE") == "1"   # read once, here
         self.wheel_range = spec["wheel_range"]
         self.detent = spec["detent"]
         self.keys = spec["keys"]
@@ -234,6 +236,8 @@ class Sx8635Buttons:
                     # full 5s means something is wrong (a missed release, a
                     # wedged chip), not a clean lift, so this never emits a
                     # tap.
+                    if self.trace:
+                        self._trace("sx8635 touch: stale latch dropped after 5s")
                     self.wheel_touched = False
                     self.wheel_prev_pos = None
                     self.wheel_landing = None
@@ -247,9 +251,19 @@ class Sx8635Buttons:
             # kill the daemon, just skip this tick.
             return []
 
+    def _trace(self, line):
+        # Diagnostics only: never touches the chip, never changes events().
+        # A dead stderr must not stop the release bookkeeping that follows.
+        try:
+            print(line, file=sys.stderr)
+        except Exception:
+            pass
+
     def _read_buttons(self):
         bitmap = self._read(self.REG_CAPSTAT_LSB)
         rising = _rising_actions(bitmap, self.prev_bitmap, self.keys)
+        if self.trace and rising:
+            self._trace("sx8635 button: bitmap=0x%02x -> %s" % (bitmap, "+".join(rising)))
         self.prev_bitmap = bitmap
         return rising
 
@@ -306,6 +320,7 @@ class Sx8635Buttons:
                     self.wheel_excursion = max(self.wheel_excursion, offset)
             self.wheel_touched = True
         else:
+            tapped = None   # compass name (UP/DOWN/...) of a tap, for the trace
             if self.wheel_touched and self.compass and self.wheel_landing is not None:
                 tap = (self.wheel_excursion <= self.tap_max_excursion
                        and (now - self.wheel_touch_time) <= self.tap_max_seconds
@@ -315,6 +330,18 @@ class Sx8635Buttons:
                     action = nearest_centre(self.wheel_landing, self.compass, self.wheel_range)
                     if action is not None:
                         actions.append(TAP_ACTIONS.get(action, action))
+                        tapped = action
+            if self.trace and self.wheel_touched and self.wheel_landing is not None:
+                # wheel_prev_pos is still the last valid position here (it is
+                # cleared just below), so it doubles as the release position.
+                last = self.wheel_prev_pos if self.wheel_prev_pos is not None else self.wheel_landing
+                self._trace("sx8635 touch: landing=%d release=%d excursion=%d dur=%.2fs "
+                            "rotated=%d scrolled=%d -> %s"
+                            % (self.wheel_landing, last, self.wheel_excursion,
+                               now - self.wheel_touch_time, self.wheel_rotated,
+                               self.wheel_scrolled,
+                               "tap " + tapped if tapped else
+                               "scroll" if self.wheel_scrolled else "none"))
             self.wheel_touched = False
             self.wheel_prev_pos = None
             self.wheel_landing = None

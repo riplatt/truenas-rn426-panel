@@ -172,6 +172,12 @@ A few things worth knowing before you touch it:
   needing masking on some units; the reason for that one is unexplained and
   unconfirmed, but masking it is harmless either way.
 
+- **Tracing touches.** Set `RN_SX8635_TRACE=1` (for example in start.sh or
+  the unit's `Environment=`) and the driver logs one line per touch with
+  what it decided (tap UP/DOWN/LEFT/RIGHT, scroll, or none), plus one line
+  per button press. It only reports what the driver already knew, with no
+  extra chip access. View it with `journalctl -u rn426-panel`.
+
 - **Never write registers 0xB1 or the NVM-burn sequence (0xAC/0xAD then the
   0xA5/0x5A pulse on 0x0E).** 0xB1 is a soft reset with no real upside for
   a read-only or SPM-only path; the NVM burn is permanent (up to 3 times)
