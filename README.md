@@ -121,6 +121,14 @@ python3 rn426_panel.py sleep   # blank the display now
 python3 rn426_panel.py wake    # re-init / wake it
 python3 rn426_panel.py run     # run the loop in the foreground
 
+# check the buttons on the panel itself (stop the service first):
+sudo systemctl stop rn426-panel
+sudo python3 rn426_panel.py test   # LCD says what to try and what it saw; ends itself once all seen
+# then start it again. TrueNAS (stopping removes the unit, so start it the way boot does):
+sudo systemd-run --unit=rn426-panel --property=Restart=always --property=RestartSec=10 \
+    /bin/bash /mnt/<your-pool>/rn426-panel/start.sh
+# Debian/OMV: sudo systemctl start rn426-panel
+
 RN_SLEEP=120 ...               # env var: idle seconds before sleep (0 = never)
 ```
 

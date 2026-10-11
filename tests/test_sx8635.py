@@ -632,5 +632,108 @@ class TestSx8635Trace(unittest.TestCase):
             self.assertIn("-> tap %s" % name, out)
 
 
+class TestLastTouch(unittest.TestCase):
+    """last_touch: what the last finished episode decided, set with trace on
+    or off, at release and on the stale-latch path."""
+
+    def _run(self, positions, times, release_time, trace=False):
+        btn = _sx8635(layout="netgear")
+        btn.trace = trace
+        buf = io.StringIO()
+        actions = []
+        with contextlib.redirect_stderr(buf):
+            for pos, t in zip(positions, times):
+                btn.queue = [0x08, 0x10, (pos >> 8) & 0xFF, pos & 0xFF]
+                actions += btn.events(t)
+            btn.queue = [0x08, 0x00]
+            actions += btn.events(release_time)
+        return btn, actions, buf.getvalue()
+
+    def test_none_before_any_episode(self):
+        self.assertIsNone(_sx8635(layout="netgear").last_touch)
+
+    def test_four_taps(self):
+        for pos, name in ((10, "DOWN"), (30, "RIGHT"), (50, "UP"), (70, "LEFT")):
+            btn, actions, _ = self._run([pos] * 3, [0.05, 0.15, 0.25], 0.3)
+            lt = btn.last_touch
+            self.assertEqual(lt["outcome"], "tap")
+            self.assertEqual(lt["name"], name)
+            self.assertEqual((lt["landing"], lt["release"], lt["excursion"]), (pos, pos, 0))
+            self.assertEqual(lt["net"], 0)
+            self.assertFalse(lt["scrolled"])
+            self.assertAlmostEqual(lt["dur"], 0.25)
+
+    def test_scroll_net_negative_is_clockwise(self):
+        btn, actions, _ = self._run([50, 40, 30, 20], [0.05, 0.1, 0.15, 0.2], 0.25)
+        self.assertEqual(actions, ["NEXT"] * 3)
+        lt = btn.last_touch
+        self.assertEqual((lt["outcome"], lt["net"], lt["scrolled"]), ("scroll", -3, True))
+        self.assertIsNone(lt["name"])
+
+    def test_scroll_net_positive_is_counter_clockwise(self):
+        btn, actions, _ = self._run([20, 30, 40], [0.05, 0.1, 0.15], 0.2)
+        self.assertEqual(actions, ["PREV"] * 2)
+        self.assertEqual(btn.last_touch["net"], 2)
+
+    def test_net_is_per_episode(self):
+        btn, _, _ = self._run([50, 40, 30], [0.05, 0.1, 0.15], 0.2)
+        self.assertEqual(btn.last_touch["net"], -2)
+        btn.queue = [0x08, 0x10, 0, 50]
+        btn.events(1.0)
+        btn.queue = [0x08, 0x00]
+        btn.events(1.1)
+        self.assertEqual(btn.last_touch["net"], 0)
+
+    def test_none_outcome(self):
+        btn, actions, _ = self._run([70, 70], [0.05, 0.1], 1.05)
+        self.assertEqual(actions, [])
+        lt = btn.last_touch
+        self.assertEqual((lt["outcome"], lt["name"]), ("none", None))
+        self.assertGreater(lt["dur"], 0.8)
+
+    def test_dead_band_excursion_is_none(self):
+        btn, _, _ = self._run([50, 56, 56], [0.05, 0.1, 0.15], 0.2)
+        self.assertEqual(btn.last_touch["outcome"], "none")
+        self.assertEqual(btn.last_touch["excursion"], 6)
+
+    def test_stale_path(self):
+        btn = _sx8635(layout="netgear")
+        btn.wheel_touched = True
+        btn.wheel_stale_since = 0.0
+        btn.queue = [0x00, 0x10, 0, 50]
+        btn.events(5.0)
+        self.assertEqual(btn.last_touch["outcome"], "stale")
+        self.assertEqual(btn.last_touch["seq"], 1)
+        self.assertFalse(btn.wheel_touched)
+
+    def test_seq_increments_per_episode(self):
+        btn, _, _ = self._run([50] * 3, [0.05, 0.15, 0.25], 0.3)
+        self.assertEqual(btn.last_touch["seq"], 1)
+        btn.queue = [0x08, 0x10, 0, 10]
+        btn.events(1.0)
+        btn.queue = [0x08, 0x00]
+        btn.events(1.1)
+        self.assertEqual(btn.last_touch["seq"], 2)
+        self.assertEqual(btn.last_touch["name"], "DOWN")
+
+    def test_set_with_trace_off_and_on_alike(self):
+        a, _, out = self._run([50] * 3, [0.05, 0.15, 0.25], 0.3, trace=False)
+        b, _, _ = self._run([50] * 3, [0.05, 0.15, 0.25], 0.3, trace=True)
+        self.assertEqual(out, "")
+        self.assertEqual(a.last_touch, b.last_touch)
+
+    def test_trace_line_matches_last_touch(self):
+        for pos, times, rel in (([50, 50, 50], [0.05, 0.15, 0.25], 0.3),
+                                ([10, 20, 30], [0.05, 0.1, 0.15], 0.2),
+                                ([70, 70], [0.05, 0.1], 1.05)):
+            btn, _, out = self._run(pos, times, rel, trace=True)
+            t = btn.last_touch
+            want = ("landing=%d release=%d excursion=%d dur=%.2fs rotated=%d scrolled=%d -> %s"
+                    % (t["landing"], t["release"], t["excursion"], t["dur"], t["rotated"],
+                       t["scrolled"],
+                       "tap " + t["name"] if t["outcome"] == "tap" else t["outcome"]))
+            self.assertIn(want, out)
+
+
 if __name__ == "__main__":
     unittest.main()

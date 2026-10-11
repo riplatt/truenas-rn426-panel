@@ -185,6 +185,17 @@ A few things worth knowing before you touch it:
   volatile and reloads fine after a power cycle. See
   `.claude/advice/sx8635-buttons-design.md` (Q1/Q2) for the full reasoning.
 
+- **To check the buttons on the panel itself, use the test mode.** Stop the
+  service (`sudo systemctl stop rn426-panel`), run
+  `sudo python3 rn426_panel.py test`, and touch the panel. Line 1 of the
+  display suggests the next thing to try (`try tap UP`, `try slide CW`, then
+  `all seen`) and line 2 shows what the driver decided for your last touch
+  (`tap UP @50`, `CW scroll -8`, `none exc=6 .31s`, `stale latch`). Items tick
+  off in any order. It finishes by itself a few seconds after everything has been seen (or press Ctrl-C): the terminal prints a summary of
+  what was and was not seen, which is the part to paste into an issue. Then
+  `sudo systemctl start rn426-panel`. It runs the daemon's own code path, so
+  it reports what the daemon would do.
+
 - **For live diagnosis, use `tools/sx8635-watch.py`.** It's a strictly
   read-only tool: it dumps the chip's status registers, then walks a
   tester through touch and wheel-rotation phases while tracing IrqSrc and

@@ -24,7 +24,9 @@ microcontroller over the Intel i801 SMBus. No kernel module required.
 
 See docs/ for the full reverse-engineering writeup and protocol details.
 
-Usage:  rn426_panel.py [run|sleep|wake]
+Usage:  rn426_panel.py [run|sleep|wake|test]
+        test = on-panel button check: stop the service first, run it, touch
+        the panel until it says all seen, then start the service again (README, Usage).
 Env:    RN_SLEEP = idle seconds before the display sleeps (default 90; 0 = never)
         RN_MODEL = force model detection (rn426 / rnx26 / rn316)
 

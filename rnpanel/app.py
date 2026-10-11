@@ -1,4 +1,4 @@
-import os, sys, time
+import os, signal, subprocess, sys, time
 from rnpanel.models import MODELS, detect_model
 from rnpanel.lcd import LCD
 from rnpanel.msp430 import Msp430Buttons
@@ -6,6 +6,7 @@ from rnpanel.sx8635 import Sx8635Buttons
 from rnpanel.pages import PAGES
 from rnpanel.i2c import fcntl, I2C_SLAVE, find_i801_bus
 from rnpanel import sx8635_spm
+from rnpanel.paneltest import PanelTest
 
 def _build(model):
     spec = MODELS[model]
@@ -198,6 +199,101 @@ def run(model):
                 lcd.lines(c[0], c[1]); last_show = now
         time.sleep(0.005)                   # 200 Hz pad-watch; no i2c, never wedges the MCU
 
+def _service_active():
+    """True if the rn426-panel service is running (two readers of the button
+    chip steal each other's events). No systemctl, or any OSError: not active."""
+    try:
+        return subprocess.call(["systemctl", "is-active", "--quiet", "rn426-panel"]) == 0
+    except OSError:
+        return False
+
+def _say(line):
+    print(line, flush=True)   # over ssh | tee stdout is block-buffered otherwise
+
+def _test_step(pt, btn, lcd, shown, now):
+    """One tick of test mode. Calls btn.events(now) exactly as run() does and
+    redraws only where run() already redraws: after an emitted action or a
+    finished touch episode (new last_touch seq), and only if the two lines
+    changed. Never at landing or mid-touch: a frame is ~15k GPIO writes and
+    would stretch a tap past tap_max_seconds. Returns the lines now shown."""
+    before = pt.last_seq
+    actions = btn.events(now)
+    l1, l2, log = pt.feed(actions, getattr(btn, "last_touch", None), now)
+    for line in log:
+        _say(line)
+    if (actions or pt.last_seq != before) and (l1, l2) != shown:
+        lcd.lines(l1, l2)
+        return (l1, l2)
+    return shown
+
+TEST_DONE_IDLE = 5   # seconds of no touches after "all seen" before test mode ends itself
+
+def _test_activity(pt, btn):
+    # Changes whenever anything at all was registered, even a repeat of the
+    # same button that leaves both LCD lines as they were.
+    return (sum(pt.counts.values()), pt.last_seq, pt.live_net)
+
+def _test_finished(pt, idle):
+    """Everything on the checklist has been seen and nothing has happened for
+    TEST_DONE_IDLE seconds. Keep touching and it keeps echoing; stop and it
+    ends without needing Ctrl-C."""
+    return pt.line1() == "all seen" and idle >= TEST_DONE_IDLE
+
+def test(model):
+    """`rn426_panel.py test`: on-panel button check, service stopped. Runs the
+    daemon's own _build/_build_buttons/events() path and shows on the LCD
+    what the driver decided for each touch. Ends by itself a few seconds after
+    everything has been seen, or on Ctrl-C or SIGTERM, with a
+    summary on stdout and "Test done" on the panel; the daemon redraws on
+    start, so no gpio.idle()/lcd.sleep() here."""
+    if _service_active():
+        print("rn426-panel is running; stop it first: sudo systemctl stop rn426-panel",
+              file=sys.stderr)
+        sys.exit(1)
+    gpio, lcd = _build(model)
+    lcd.init()
+    btn = _build_buttons(gpio, model, MODELS[model])
+    if btn is None:
+        print("%s has no usable buttons (display-only model, no interrupt line, or "
+              "button init failed above); nothing to test." % model, file=sys.stderr)
+        sys.exit(1)
+    btn.trace = False   # the test prints its own lines; no duplicate stderr trace
+    pt = PanelTest.for_button(btn)
+    t0 = time.time()
+    lcd.lines(*pt.lines())
+    pt.frame_ms = (time.time() - t0) * 1000
+    shown = pt.lines()
+    _say("frame time: %d ms (the panel is deaf to touches for about this long after "
+         "each redraw)" % pt.frame_ms)
+    _say("checklist: %s" % ", ".join(label for _, label in pt.items))
+    _say("touch the panel; it finishes %d s after everything has been seen, or on Ctrl-C"
+         % TEST_DONE_IDLE)
+    try:
+        signal.signal(signal.SIGTERM, lambda *a: sys.exit(0))   # run the finally below
+    except (ValueError, OSError):
+        pass
+    try:
+        last_change = time.time()
+        while True:
+            now = time.time()
+            was = _test_activity(pt, btn)
+            shown = _test_step(pt, btn, lcd, shown, now)
+            if _test_activity(pt, btn) != was or getattr(btn, "wheel_touched", False):
+                last_change = now
+            elif _test_finished(pt, now - last_change):
+                _say("all seen and the panel has been quiet for %d s; finishing" % TEST_DONE_IDLE)
+                break
+            time.sleep(0.005)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        for line in pt.summary():
+            _say(line)
+        try:
+            lcd.lines("Test done", "")
+        except Exception:   # e.g. Ctrl-C landed mid-byte; init() fixes the panel on restart
+            pass
+
 def main():
     model = detect_model()
     mode = sys.argv[1] if len(sys.argv) > 1 else "run"
@@ -208,5 +304,7 @@ def main():
     elif mode == "wake":
         gpio, lcd = _build(model)
         lcd.init(); print("display awake")
+    elif mode == "test":
+        test(model)
     else:
         run(model)

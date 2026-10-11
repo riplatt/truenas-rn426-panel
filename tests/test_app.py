@@ -12,7 +12,7 @@ import rnpanel.app as app
 import rnpanel.sx8635 as sx8635
 import rnpanel.sx8635_spm as sx8635_spm
 from rnpanel.models import MODELS
-from fakes import FakeGpio
+from fakes import FakeGpio, _sx8635
 
 
 class TestRotateSeconds(unittest.TestCase):
@@ -273,6 +273,192 @@ class TestBuildButtonsDegradeGate(unittest.TestCase):
     def test_other_model_construction_error_degrades(self):
         result = app._build_buttons(self._gpio(), "rnx26", {"buttons": "msp430"})
         self.assertIsNone(result)
+
+
+class _RecLcd(object):
+    def __init__(self):
+        self.frames = []
+
+    def lines(self, a, b):
+        self.frames.append((a, b))
+
+    def init(self):
+        pass
+
+
+def _script_btn(script):
+    """A real-shaped (netgear) button object whose events() replays a script
+    of (actions, last_touch) per call, then raises KeyboardInterrupt, like
+    Ctrl-C."""
+    btn = _sx8635(keys=MODELS["rn316"]["sx8635"]["layouts"]["netgear"]["keys"],
+                  layout="netgear")
+    btn.trace = True
+    btn.script = list(script)
+    btn.calls = []
+
+    def events(now):
+        btn.calls.append(now)
+        if not btn.script:
+            raise KeyboardInterrupt
+        actions, lt = btn.script.pop(0)
+        if lt is not None:
+            btn.last_touch = lt
+        return actions
+    btn.events = events
+    return btn
+
+
+def _lt(seq, **kw):
+    d = dict(seq=seq, landing=50, release=50, excursion=0, dur=0.2, rotated=False,
+             scrolled=False, net=0, outcome="tap", name="UP")
+    d.update(kw)
+    return d
+
+
+class TestPanelTestMode(unittest.TestCase):
+    def setUp(self):
+        self._saved = (app._service_active, app._build, app._build_buttons, app.time.sleep)
+        app.time.sleep = lambda s: None
+        self.lcd = _RecLcd()
+        self.btn = None
+        app._service_active = lambda: False
+        app._build = lambda model: (object(), self.lcd)
+        app._build_buttons = lambda gpio, model, spec: self.btn
+
+    def tearDown(self):
+        app._service_active, app._build, app._build_buttons, app.time.sleep = self._saved
+
+    def _run(self, model="rn316"):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            app.test(model)
+        return out.getvalue(), err.getvalue()
+
+    def test_main_dispatches_test(self):
+        seen = []
+        saved = (app.test, app.detect_model, sys.argv)
+        app.test = lambda model: seen.append(model)
+        app.detect_model = lambda: "rn426"
+        sys.argv = ["rn426_panel.py", "test"]
+        try:
+            app.main()
+        finally:
+            app.test, app.detect_model, sys.argv = saved
+        self.assertEqual(seen, ["rn426"])
+
+    def test_finishes_only_when_all_seen_and_quiet(self):
+        class Pt(object):
+            def __init__(self, l1): self._l1 = l1
+            def line1(self): return self._l1
+        self.assertFalse(app._test_finished(Pt("try UP"), 60))
+        self.assertFalse(app._test_finished(Pt("all seen"), app.TEST_DONE_IDLE - 0.1))
+        self.assertTrue(app._test_finished(Pt("all seen"), app.TEST_DONE_IDLE))
+
+    def test_activity_token_moves_on_a_repeat_press(self):
+        # Same button twice leaves both LCD lines unchanged; it must still
+        # count as activity so the quiet timer restarts.
+        class Pt(object):
+            counts = {"OK": 1}; last_seq = 0; live_net = 0
+        a = app._test_activity(Pt, None)
+        Pt.counts = {"OK": 2}
+        self.assertNotEqual(app._test_activity(Pt, None), a)
+
+    def test_exits_1_when_buttons_none(self):
+        with self.assertRaises(SystemExit) as cm:
+            self._run()
+        self.assertEqual(cm.exception.code, 1)
+        self.assertEqual(self.lcd.frames, [])
+
+    def test_refuses_when_service_active(self):
+        app._service_active = lambda: True
+        built = []
+        app._build = lambda model: built.append(model)
+        with self.assertRaises(SystemExit) as cm:
+            self._run()
+        self.assertEqual(cm.exception.code, 1)
+        self.assertEqual(built, [])   # refused before touching any hardware
+
+    def test_service_check_tolerates_missing_systemctl(self):
+        saved = app.subprocess.call
+        app._service_active = self._saved[0]
+        def boom(*a, **k):
+            raise OSError("no systemctl")
+        app.subprocess.call = boom
+        try:
+            self.assertFalse(app._service_active())
+        finally:
+            app.subprocess.call = saved
+
+    def test_service_check_uses_is_active_quiet(self):
+        saved = app.subprocess.call
+        app._service_active = self._saved[0]
+        got = []
+        app.subprocess.call = lambda cmd: got.append(cmd) or 0
+        try:
+            self.assertTrue(app._service_active())
+        finally:
+            app.subprocess.call = saved
+        self.assertEqual(got, [["systemctl", "is-active", "--quiet", "rn426-panel"]])
+
+    def test_redraws_only_on_action_or_episode_and_only_on_change(self):
+        tap = _lt(1)
+        self.btn = _script_btn([
+            ([], None),                  # idle
+            (["OK"], None),              # action: line 2 changes -> draw
+            (["OK"], None),              # action, lines unchanged -> no draw
+            ([], None),                  # idle
+            (["PREV"], tap),             # tap episode -> draw
+            ([], tap),                   # same episode re-read -> no draw
+        ])
+        out, _ = self._run()
+        # frame 0 = the timed initial frame, then OK, then the tap, then Test done
+        self.assertEqual(self.lcd.frames, [
+            ("try OK", "waiting"),
+            ("try tap UP", "OK"),
+            ("try tap DOWN", "tap UP @50"),
+            ("Test done", ""),
+        ])
+        self.assertIn("frame time:", out)
+        self.assertIn("panel test summary", out)
+
+    def test_no_redraw_while_touching(self):
+        # no actions and no new last_touch: nothing to draw however long it runs
+        self.btn = _script_btn([([], None)] * 50)
+        self._run()
+        self.assertEqual(self.lcd.frames, [("try OK", "waiting"), ("Test done", "")])
+
+    def test_trace_forced_off_and_events_called_each_tick(self):
+        self.btn = _script_btn([([], None)] * 3)
+        self._run()
+        self.assertFalse(self.btn.trace)
+        self.assertEqual(len(self.btn.calls), 4)   # 3 scripted + the one that raised
+
+    def test_exit_draw_failure_does_not_mask_summary(self):
+        self.btn = _script_btn([(["OK"], None)])
+        def lines(a, b):
+            if a == "Test done":
+                raise OSError("boom")
+            self.lcd.frames.append((a, b))
+        self.lcd.lines = lines
+        out, _ = self._run()
+        self.assertIn("panel test summary", out)
+
+    def test_sigterm_handler_installed_and_exits_cleanly(self):
+        import signal
+        self.btn = _script_btn([])
+        old = signal.getsignal(signal.SIGTERM)
+        try:
+            self._run()
+            handler = signal.getsignal(signal.SIGTERM)
+            with self.assertRaises(SystemExit):
+                handler(signal.SIGTERM, None)
+        finally:
+            signal.signal(signal.SIGTERM, old)
+
+    def test_does_not_sleep_the_panel_or_idle_gpio(self):
+        self.lcd.sleep = lambda: self.fail("lcd.sleep called")
+        self.btn = _script_btn([])
+        self._run()
 
 
 if __name__ == "__main__":

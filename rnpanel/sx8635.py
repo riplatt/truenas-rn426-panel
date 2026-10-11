@@ -146,6 +146,14 @@ class Sx8635Buttons:
     SAFETY_INTERVAL = 1.0                 # seconds; read even with no NIRQ/no touch
     WHEEL_POLL_HZ_INTERVAL = 1.0 / 50     # poll >= 50 Hz while the wheel is touched
     trace = False   # RN_SX8635_TRACE=1: one stderr line per touch/button (no chip access)
+    # What the last finished touch episode decided (set at release and on the
+    # stale-latch path, trace on or off; None until the first one). Pure
+    # bookkeeping for the on-panel test and the trace line, no chip access.
+    # `seq` counts episodes so a reader can tell a new dict from the old one;
+    # `net` is the signed detents emitted (NEXT = -1, PREV = +1).
+    last_touch = None
+    touch_seq = 0
+    wheel_net = 0
 
     def __init__(self, gpio, spec):
         self.gpio = gpio
@@ -172,6 +180,7 @@ class Sx8635Buttons:
         self.wheel_excursion = 0
         self.wheel_rotated = False
         self.wheel_scrolled = False
+        self.wheel_net = 0
         self.last_read = 0.0
         # First read: confirm the chip actually answers (raises OSError on
         # NAK/missing bus, which _build_buttons treats as "degrade, don't
@@ -236,6 +245,7 @@ class Sx8635Buttons:
                     # full 5s means something is wrong (a missed release, a
                     # wedged chip), not a clean lift, so this never emits a
                     # tap.
+                    self._finish_touch(now, "stale", None)
                     if self.trace:
                         self._trace("sx8635 touch: stale latch dropped after 5s")
                     self.wheel_touched = False
@@ -258,6 +268,18 @@ class Sx8635Buttons:
             print(line, file=sys.stderr)
         except Exception:
             pass
+
+    def _finish_touch(self, now, outcome, name):
+        """Record the finished episode in last_touch (see the class attrs).
+        wheel_prev_pos is still the last valid position here, so it doubles
+        as the release position. Caller clears the episode state after."""
+        last = self.wheel_prev_pos if self.wheel_prev_pos is not None else self.wheel_landing
+        self.touch_seq += 1
+        self.last_touch = {
+            "seq": self.touch_seq, "landing": self.wheel_landing, "release": last,
+            "excursion": self.wheel_excursion, "dur": now - self.wheel_touch_time,
+            "rotated": self.wheel_rotated, "scrolled": self.wheel_scrolled,
+            "net": self.wheel_net, "outcome": outcome, "name": name}
 
     def _read_buttons(self):
         bitmap = self._read(self.REG_CAPSTAT_LSB)
@@ -297,6 +319,7 @@ class Sx8635Buttons:
                 self.wheel_excursion = 0
                 self.wheel_rotated = False
                 self.wheel_scrolled = False
+                self.wheel_net = 0
             if cap_msb & self.WHEEL_ROTATING:
                 self.wheel_rotated = True
             msb = self._read(self.REG_POS_MSB)
@@ -314,6 +337,7 @@ class Sx8635Buttons:
                 events, self.wheel_acc = _wheel_emit(self.wheel_acc, self.detent)
                 if events:
                     self.wheel_scrolled = True
+                    self.wheel_net += events.count("PREV") - events.count("NEXT")
                 actions += events
                 if self.wheel_landing is not None:
                     offset = abs(_wheel_delta(pos, self.wheel_landing, self.wheel_range))
@@ -331,17 +355,16 @@ class Sx8635Buttons:
                     if action is not None:
                         actions.append(TAP_ACTIONS.get(action, action))
                         tapped = action
-            if self.trace and self.wheel_touched and self.wheel_landing is not None:
-                # wheel_prev_pos is still the last valid position here (it is
-                # cleared just below), so it doubles as the release position.
-                last = self.wheel_prev_pos if self.wheel_prev_pos is not None else self.wheel_landing
-                self._trace("sx8635 touch: landing=%d release=%d excursion=%d dur=%.2fs "
-                            "rotated=%d scrolled=%d -> %s"
-                            % (self.wheel_landing, last, self.wheel_excursion,
-                               now - self.wheel_touch_time, self.wheel_rotated,
-                               self.wheel_scrolled,
-                               "tap " + tapped if tapped else
-                               "scroll" if self.wheel_scrolled else "none"))
+            if self.wheel_touched and self.wheel_landing is not None:
+                self._finish_touch(now, "tap" if tapped else
+                                   "scroll" if self.wheel_scrolled else "none", tapped)
+                if self.trace:
+                    t = self.last_touch
+                    self._trace("sx8635 touch: landing=%d release=%d excursion=%d dur=%.2fs "
+                                "rotated=%d scrolled=%d -> %s"
+                                % (t["landing"], t["release"], t["excursion"], t["dur"],
+                                   t["rotated"], t["scrolled"],
+                                   "tap " + t["name"] if t["outcome"] == "tap" else t["outcome"]))
             self.wheel_touched = False
             self.wheel_prev_pos = None
             self.wheel_landing = None

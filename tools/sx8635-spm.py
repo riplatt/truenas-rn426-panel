@@ -291,6 +291,8 @@ def cmd_capsense(fd, yes):
     ok = result in ("applied", "already", "capmode-only")
     out("\nNext steps:")
     if ok:
+        out("  - to check the ring on the panel itself, run 'sudo python3 rn426_panel.py test'")
+        out("    now (service is stopped), it ends itself once all seen")
         out("  - systemctl start rn426-panel, then just use the ring")
         out("  - for one journal line per touch, set RN_SX8635_TRACE=1 (docs/porting.md)")
         out("  - SPM is volatile: after a cold power cycle, re-run 'capsense --yes' again --")
