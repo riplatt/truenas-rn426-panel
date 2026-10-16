@@ -40,14 +40,20 @@ has a `PADCFG_DW0` register (PADBAR = `0x400` on both communities here):
 touch two bits of `PADCFG_DW0`:
 
 - **bit 0** = `GPIOTXSTATE` (the output level)
-- **bit 9** = `GPIOTXDIS` (1 = output disabled). Clear it to enable the driver.
+- **bit 8** = `GPIOTXDIS` (1 = output disabled). The BIOS leaves these pads
+  as outputs (0), so there is nothing to clear.
+- **bit 9** = `GPIORXDIS` (1 = input buffer disabled). The driver currently
+  clears it as well, which is harmless here.
 
 ```python
 v = read32(pad)
-v &= ~(1 << 9)            # enable output
-v = (v & ~1) | (level)    # set level
+v = (v & ~1) | (level)    # set level (the driver also clears bit 9 today)
 write32(pad, v)
 ```
+
+(Earlier notes called bit 9 `GPIOTXDIS`; per `pinctrl-intel.c` that is bit 8.
+Changing the driver to write only bit 0 is deferred until test-booted on an
+RN426.)
 
 > These exact addresses are specific to the RN426 (`rn426_8`) pad map. Other
 > models map different pads. See [`porting.md`](porting.md).

@@ -70,8 +70,9 @@ Instead, decode `gpio_dnv`'s own mapping:
 
 Reading `table5` for the RN426 pins and adding the community base + PADBAR
 (read live from the hardware: `0x400`) gives the **physical PADCFG_DW0
-addresses** used by this driver. From there, drive bit 0 (level) and clear bit 9
-(`GPIOTXDIS`) directly via `/dev/mem`, bypassing the gpiochip numbering.
+addresses** used by this driver. From there, drive bit 0 (level) directly via `/dev/mem`
+(the driver also clears bit 9, `GPIORXDIS`; `GPIOTXDIS` is bit 8 and the BIOS
+leaves it 0), bypassing the gpiochip numbering.
 See [`lcd-protocol.md`](lcd-protocol.md) for the resulting table.
 
 ## Step 4: the buttons

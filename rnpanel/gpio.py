@@ -17,8 +17,15 @@ class Gpio:
 # --------------------------------------------------------------------------
 # DnvMmioGpio: bit-bang SPI on Denverton PADCFG_DW0 registers via /dev/mem.
 #   North GPIO community base 0xFDC20000, South 0xFDC50000 (PADBAR 0x400).
-#   Drive a pad = clear bit 9 (GPIOTXDIS -> output enable) + set bit 0 (TX value).
-#   The firmware leaves these pads in GPIO mode, so only those two bits matter.
+#   PADCFG_DW0 bits (pinctrl-intel.c): bit 0 = GPIOTXSTATE (output level),
+#   bit 8 = GPIOTXDIS (1 = output driver disabled), bit 9 = GPIORXDIS.
+#   Driving a pad = set bit 0 to the level. The BIOS leaves these six pads in
+#   GPIO mode as outputs (TXDIS = 0), so the level bit is all that matters.
+#   NOTE: _set() currently also clears bit 9, which is RX disable, not TX
+#   disable. That is harmless here (it only turns the input buffer on) and is
+#   left as is until a change has been test-booted on an RN426.
+#   TODO: write only bit 0, plus a read-only pre-flight (PADBAR == 0x400,
+#   PMODE == 0, TXDIS == 0 on the six pads) that refuses to run on mismatch.
 # --------------------------------------------------------------------------
 class DnvMmioGpio(Gpio):
     """RN426/RN428 backend: Denverton (Atom C3000) SoC GPIO via /dev/mem."""
@@ -46,7 +53,7 @@ class DnvMmioGpio(Gpio):
     def _set(self, pad, val):
         m, o = pad
         v = struct.unpack_from("<I", m, o)[0]
-        v &= ~(1 << 9)                  # GPIOTXDIS = 0 (enable output driver)
+        v &= ~(1 << 9)                  # bit 9 is GPIORXDIS (not TXDIS), see TODO above
         v = (v & ~1) | (val & 1)        # GPIOTXSTATE = val
         struct.pack_into("<I", m, o, v)
 
