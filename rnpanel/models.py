@@ -113,9 +113,16 @@ MODELS = {
     },
 }
 
+# RN422/RN424 refusal. We do not know the exact DMI string yet, so match
+# conservatively: a "RN" or "ReadyNAS" prefix, optional space or dash, then 422
+# or 424 not followed by another digit (so RN4220 and RN426/RN428 do not
+# match; a trailing letter such as RN424D does). Case-insensitive. To be
+# tightened once the reporter of issue #11 sends the real DMI strings.
+_RN422_424_RE = re.compile(r"\b(?:RN|ReadyNAS)[\s-]*42[24](?!\d)", re.I)
+
 def detect_model(cpuinfo_reader=None, dmi_reader=None):
-    """Pick a MODELS key: RN_MODEL env wins if set, else /proc/cpuinfo (Atom
-    C3xxx -> rn426), else DMI product_name (ReadyNAS 528X/628X -> rnx26).
+    """Pick a MODELS key: RN_MODEL env wins if set, else refuse RN422/RN424 by
+    DMI product name, else /proc/cpuinfo (Atom C3xxx -> rn426), else DMI product_name (ReadyNAS 528X/628X -> rnx26).
     Refuses (sys.exit) rather than guessing on unrecognized hardware: the Dnv
     backend writes hard-coded PADCFG addresses and the Ich backend writes
     hard-coded I/O ports, and on the wrong chipset either is a blind register
@@ -128,6 +135,21 @@ def detect_model(cpuinfo_reader=None, dmi_reader=None):
             return env
         sys.exit("RN_MODEL=%s is not a known model (%s)" % (env, ", ".join(sorted(MODELS))))
 
+    # DMI product name is read first so the RN422/RN424 refusal can run
+    # before the C3xxx -> rn426 rule (those boxes are Atom C3xxx too).
+    read_dmi = dmi_reader or (lambda: open("/sys/class/dmi/id/product_name").read())
+    try:
+        product = read_dmi().strip()
+    except OSError:
+        product = ""
+    if _RN422_424_RE.search(product):
+        sys.exit(
+            "refusing to start: DMI product is '%s', a ReadyNAS RN422/RN424.\n"
+            "RN422/RN424 are not supported yet (see GitHub issue #11). They have\n"
+            "the same Atom C3000 CPU as the RN426 but a different pin map, so the\n"
+            "RN426 pads would be driven on unknown pins. RN_MODEL=rn426 is NOT\n"
+            "safe on this model, do not force it." % product)
+
     read_cpuinfo = cpuinfo_reader or (lambda: open("/proc/cpuinfo").read())
     try:
         cpu = read_cpuinfo()
@@ -138,11 +160,6 @@ def detect_model(cpuinfo_reader=None, dmi_reader=None):
     if re.search(r"\bC3\d{3}\b", cpu_name):
         return "rn426"
 
-    read_dmi = dmi_reader or (lambda: open("/sys/class/dmi/id/product_name").read())
-    try:
-        product = read_dmi().strip()
-    except OSError:
-        product = ""
     if product in ("ReadyNAS 528X", "ReadyNAS 628X"):
         return "rnx26"
     if product == "ReadyNAS 316":

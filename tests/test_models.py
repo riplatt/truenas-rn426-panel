@@ -73,6 +73,31 @@ class TestDetectModel(unittest.TestCase):
         with self.assertRaises(SystemExit):
             detect_model(cpuinfo_reader=cpuinfo, dmi_reader=dmi)
 
+    @staticmethod
+    def _c3000():
+        return "model name\t: Intel(R) Atom(TM) CPU C3538 @ 2.10GHz\n"
+
+    def test_rn422_rn424_refused_despite_c3xxx_cpu(self):
+        os.environ.pop("RN_MODEL", None)
+        for name in ("ReadyNAS 424", "RN424", "RN-422", "readynas 422", "RN424D", "ReadyNAS RN424"):
+            with self.assertRaises(SystemExit, msg=name) as cm:
+                detect_model(cpuinfo_reader=self._c3000, dmi_reader=lambda n=name: n + "\n")
+            msg = str(cm.exception)
+            self.assertIn("issue #11", msg)
+            self.assertIn("NOT", msg)
+
+    def test_rn426_rn428_and_lookalikes_still_rn426(self):
+        os.environ.pop("RN_MODEL", None)
+        for name in ("ReadyNAS 426", "RN426", "ReadyNAS 428", "RN4220", "RN4240", "<unknown>", ""):
+            self.assertEqual(
+                detect_model(cpuinfo_reader=self._c3000, dmi_reader=lambda n=name: n + "\n"),
+                "rn426", name)
+
+    def test_rn_model_override_wins_over_rn424_dmi(self):
+        os.environ["RN_MODEL"] = "rn426"
+        self.assertEqual(
+            detect_model(cpuinfo_reader=self._c3000, dmi_reader=lambda: "ReadyNAS 424\n"), "rn426")
+
 
 if __name__ == "__main__":
     unittest.main()
