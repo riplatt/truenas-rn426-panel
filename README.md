@@ -61,9 +61,8 @@ from the stock ReadyNAS firmware and reimplemented from scratch in pure Python
 ## How it works (short version)
 
 - The LCD is bit-banged SPI over the Intel Denverton SoC GPIO pads, written
-  directly through `/dev/mem` (PADCFG_DW0 registers). The P2SB window that
-  exposes those registers is un-hidden with a pure-Python PCI-config write via
-  `/dev/port`, no helper binary.
+  directly through `/dev/mem` (PADCFG_DW0 registers). The P2SB window can stay
+  hidden; the GPIO registers are reachable without unhiding it.
 - The buttons live on a front-board MSP430 microcontroller on the Intel
   i801 SMBus; the driver reads its `reg 0x04` button bitmap over `/dev/i2c`.
   It does not poll i2c (that corrupts the MCU's button scanning over time).

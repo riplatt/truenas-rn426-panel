@@ -1,22 +1,4 @@
-import mmap, struct, sys, os
-
-# --------------------------------------------------------------------------
-# P2SB unhide -- pure Python PCI-config write via /dev/port (no helper binary).
-# The Denverton GPIO community registers live behind the P2SB/SBREG window,
-# which the BIOS hides. Clearing bit 0 of 00:1f.1 cfg reg 0xE1 reveals it.
-# Only the Dnv backend needs this; the Ich backend's registers aren't hidden.
-# --------------------------------------------------------------------------
-def _pci_cfg_write_byte(bus, dev, fn, reg, val):
-    addr = 0x80000000 | (bus << 16) | (dev << 11) | (fn << 8) | (reg & 0xFC)
-    with open("/dev/port", "r+b", 0) as p:
-        p.seek(0xCF8); p.write(struct.pack("<I", addr))
-        p.seek(0xCFC + (reg & 3)); p.write(bytes([val & 0xFF]))
-
-def p2sb_unhide():
-    try:
-        _pci_cfg_write_byte(0, 0x1F, 1, 0xE1, 0x00)
-    except Exception as e:
-        print("p2sb_unhide failed:", e, file=sys.stderr)
+import mmap, struct, os
 
 # --------------------------------------------------------------------------
 # Gpio seam. Two backends, one interface: set(sig, val) drives one of the six
@@ -49,7 +31,8 @@ class DnvMmioGpio(Gpio):
         # what a given model's spec carries: spec["backend"](spec). The Dnv
         # backend's six PADCFG addresses below are hardcoded to this one
         # board, not derived from a pin map or an lpc_id/ngpio pair.
-        p2sb_unhide()
+        # No P2SB unhide: the GPIO community MMIO is reachable with P2SB
+        # hidden (the stock kernel driver works that way too).
         self._fN = open("/dev/mem", "r+b"); self.mN = mmap.mmap(self._fN.fileno(), 0x1000, offset=self.NORTH)
         self._fS = open("/dev/mem", "r+b"); self.mS = mmap.mmap(self._fS.fileno(), 0x1000, offset=self.SOUTH)
         # (mmap, PADCFG_DW0 offset within the community)

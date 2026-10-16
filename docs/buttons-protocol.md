@@ -54,7 +54,7 @@ interrupt line is a Denverton SoC GPIO pad you can read via `/dev/mem`:
 
 - **INT pad: South GPIO community `0xFDC50000` + offset `0x570`** (pad 46).
   Read **`RXSTATE` = bit 1** of `PADCFG_DW0`. **Active-low**, idle `1` (high),
-  pulled `0` (low) on button activity. (This is the same P2SB/SBREG window the LCD
+  pulled `0` (low) on button activity. (This is the same GPIO community MMIO the LCD
   driver already uses; see [lcd-protocol.md](lcd-protocol.md). Read it only, never
   drive it.)
 

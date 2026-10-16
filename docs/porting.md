@@ -65,9 +65,9 @@ That means the pin numbers alone don't get you a working port on those five.
 
 `gpio_ich` is the older Intel ICH/PCH GPIO block, and it's typically
 I/O-port based rather than MMIO PADCFG. If that's right, a `gpio_ich` pad
-needs a different access mechanism, closer to the `/dev/port` route this
-driver already uses for the P2SB unhide (`lcd-protocol.md` Step 1) than to
-the `/dev/mem` route it uses for the pads. I want to be clear this part is
+needs a different access mechanism, closer to the `/dev/port` route the
+`gpio_ich` backend already uses than to the `/dev/mem` route the Denverton
+backend uses for its pads. I want to be clear this part is
 unverified, I have not checked it against real hardware or against the
 `gpio_ich` driver itself. Check it before estimating how much work a
 `gpio_ich` port is.

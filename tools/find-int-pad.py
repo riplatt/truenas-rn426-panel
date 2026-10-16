@@ -37,14 +37,6 @@ IDLE_SECS  = float(sys.argv[1]) if len(sys.argv) > 1 else 5.0
 PRESS_SECS = float(sys.argv[2]) if len(sys.argv) > 2 else 9.0
 TICK = 0.004
 
-# --- P2SB unhide: the GPIO community registers sit behind a window the BIOS
-#     hides; clearing bit 0 of PCI 00:1f.1 reg 0xE1 reveals it (pure /dev/port).
-def p2sb_unhide():
-    addr = 0x80000000 | (0 << 16) | (0x1F << 11) | (1 << 8) | (0xE1 & 0xFC)
-    with open("/dev/port", "r+b", 0) as p:
-        p.seek(0xCF8); p.write(struct.pack("<I", addr))
-        p.seek(0xCFC + (0xE1 & 3)); p.write(bytes([0x00]))
-
 # --- optional: read MCU reg 0x04 to confirm the MCU is actually reporting -----
 I2C_SLAVE, I2C_SMBUS = 0x0703, 0x0720
 class _sm(ctypes.Structure):
@@ -69,8 +61,7 @@ def reg04():
 
 def main():
     if os.geteuid() != 0:
-        sys.exit("Run as root (needs /dev/mem, /dev/port, /dev/i2c).")
-    p2sb_unhide()
+        sys.exit("Run as root (needs /dev/mem, /dev/i2c).")
     maps = []
     for name, base in COMMUNITIES:
         f = open("/dev/mem", "r+b")

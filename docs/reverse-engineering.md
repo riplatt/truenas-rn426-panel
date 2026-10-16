@@ -96,5 +96,6 @@ bit→button mapping empirically by holding each button and watching `reg 0x04`
 - **i2c bus numbering swaps across reboots** (i801 ↔ iSMT); find i801 by name.
 - **MSP430 `reg 0x02` gates button scanning** and only resets on a cold
   power-cycle. See [`buttons-protocol.md`](buttons-protocol.md).
-- The unhidden **P2SB** is needed for the SoC GPIO MMIO; the BIOS re-hides it on
-  every boot, so the driver un-hides it at startup.
+- The SoC GPIO MMIO is reachable with the **P2SB** hidden, so the driver does
+  not unhide it. (Earlier versions tried a `/dev/port` unhide; it never
+  latched and wrote a stray byte to `0xCF9`, so it was removed.)

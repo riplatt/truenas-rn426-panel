@@ -4,8 +4,7 @@ driver package. See rn426_panel.py (the entrypoint next to this directory)
 for the usage docstring; this package only holds the implementation.
 
 Layer map (leaves first; nothing here imports rnpanel.app):
-    gpio.py     Gpio backends (Dnv MMIO, ICH I/O-port) + the P2SB unhide
-                helper the Dnv backend needs. Leaf module.
+    gpio.py     Gpio backends (Dnv MMIO, ICH I/O-port). Leaf module.
     lcd.py      INIT_SEQ + the SSD1305 LCD driving logic. Leaf module.
     i2c.py      fcntl import guard, I2C_SLAVE/I2C_SMBUS ioctl constants,
                 _smbus_ioctl, find_i801_bus. Leaf module.

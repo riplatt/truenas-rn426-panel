@@ -12,24 +12,19 @@ The display is a 128×32 SSD1305-class panel driven by 4-wire SPI
 There is no SPI controller in play. The host bit-bangs all six signals on
 Denverton SoC GPIO pads, written directly through `/dev/mem`.
 
-## Step 1: un-hide the P2SB (SBREG) window
+## Step 1: nothing to do for the P2SB (SBREG) window
 
-The Denverton GPIO community registers live behind the **P2SB** sideband bridge
-at `0xFD000000`, which the BIOS hides. Clear **bit 0 of PCI `00:1f.1` config
-register `0xE1`** to reveal it. Pure-Python via legacy PCI config ports:
+The Denverton GPIO community registers sit behind the P2SB bridge, which the
+BIOS hides. The GPIO community MMIO is still reachable through `/dev/mem` with
+P2SB hidden, as the stock kernel driver does, so no unhide is needed.
 
-```python
-def pci_cfg_write_byte(bus, dev, fn, reg, val):
-    addr = 0x80000000 | (bus<<16) | (dev<<11) | (fn<<8) | (reg & 0xFC)
-    with open("/dev/port", "r+b", 0) as p:
-        p.seek(0xCF8); p.write(struct.pack("<I", addr))   # outl CONFIG_ADDRESS
-        p.seek(0xCFC + (reg & 3)); p.write(bytes([val]))  # outb CONFIG_DATA
-pci_cfg_write_byte(0, 0x1F, 1, 0xE1, 0x00)
-```
+Earlier versions of this driver tried to unhide it with a `/dev/port` write to
+PCI config `00:1f.1` reg `0xE1`. It never latched (`/dev/port` writes bytes, not
+the dword `0xCF8` needs) and it put a stray byte on `0xCF9`. Removed.
 
 ## Step 2: the GPIO pads (PADCFG_DW0 registers)
 
-After unhiding, the two GPIO communities are mmap-able from `/dev/mem`. Each pad
+The two GPIO communities are mmap-able from `/dev/mem`. Each pad
 has a `PADCFG_DW0` register (PADBAR = `0x400` on both communities here):
 
 | Signal | Community base | PADCFG_DW0 address |

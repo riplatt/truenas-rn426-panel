@@ -171,7 +171,7 @@ else
     echo "  /sys/class/hwmon not present"
 fi
 
-section "6. PCI (SMBus / LPC / ISA bridge; 00:1f.1 = P2SB the LCD driver needs to unhide)"
+section "6. PCI (SMBus / LPC / ISA bridge; 00:1f.1 = P2SB, may be hidden; the LCD driver does not need it)"
 if have lspci; then
     lspci -nn 2>/dev/null | grep -iE 'SMBus|LPC|ISA bridge' || echo "  (no SMBus/LPC/ISA bridge lines matched)"
     echo

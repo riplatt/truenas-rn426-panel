@@ -244,5 +244,21 @@ class TestGpioIdle(unittest.TestCase):
         self.assertEqual(gp._rd_byte(0x0C) & (1 << 6), 1 << 6)
 
 
+class TestNoP2sbUnhide(unittest.TestCase):
+    """The old P2SB unhide wrote PCI config through /dev/port (0xCF8) and
+    never worked. Keep it out of the package."""
+
+    def test_package_has_no_p2sb_or_cf8_port_writes(self):
+        pkg = os.path.join(os.path.dirname(_HERE), "rnpanel")
+        for name in sorted(os.listdir(pkg)):
+            if not name.endswith(".py"):
+                continue
+            with open(os.path.join(pkg, name), encoding="utf-8") as f:
+                src = f.read().lower()
+            self.assertNotIn("p2sb_unhide", src, name)
+            self.assertNotIn("_pci_cfg_write_byte", src, name)
+            self.assertNotIn("0xcf8", src, name)
+
+
 if __name__ == "__main__":
     unittest.main()
